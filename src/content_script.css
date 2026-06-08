@@ -1,0 +1,83 @@
+.ytct-hide-native-captions .html5-video-player .caption-window {
+  opacity: 0 !important;
+  visibility: hidden !important;
+  pointer-events: none !important;
+}
+
+.ytct-overlay {
+  position: fixed;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  left: 50%;
+  top: 86%;
+  z-index: 2147483647;
+  box-sizing: border-box;
+  width: auto;
+  min-width: 0;
+  max-width: none;
+  transform: translate(-50%, -100%);
+  padding: 0.08em 0.38em 0.16em;
+  border-radius: 2px;
+  background: rgba(8, 8, 8, 0.78);
+  color: #fff;
+  font-family:
+    "PingFang SC",
+    "Microsoft YaHei",
+    "Noto Sans CJK SC",
+    Arial,
+    sans-serif;
+  font-weight: 500;
+  line-height: 1.24;
+  letter-spacing: 0;
+  text-align: center;
+  text-shadow: 0 1px 2px rgba(0, 0, 0, 0.75);
+  white-space: normal;
+  pointer-events: auto;
+  cursor: grab;
+  touch-action: none;
+  user-select: none;
+  --ytct-font-scale: 1;
+}
+
+.ytct-line {
+  display: block;
+  width: auto;
+  max-width: 100%;
+  margin: 0 auto;
+  padding: 0;
+  background: transparent !important;
+  overflow-wrap: anywhere;
+}
+
+.ytct-line + .ytct-line {
+  margin-top: 0.04em;
+}
+
+.ytct-line-placeholder {
+  visibility: hidden;
+}
+
+.ytct-line-source {
+  font-size: calc(clamp(18px, 2.05vw, 33px) * var(--ytct-font-scale));
+}
+
+.ytct-line-translation {
+  font-size: calc(clamp(18px, 1.95vw, 32px) * var(--ytct-font-scale));
+}
+
+.ytct-overlay[data-mode="loading"] {
+  color: rgba(255, 255, 255, 0.78);
+}
+
+.ytct-overlay[data-mode="error"] {
+  color: #ffd4d4;
+  font-size: clamp(14px, 1.5vw, 20px);
+}
+
+@media (max-width: 720px) {
+  .ytct-line-source,
+  .ytct-line-translation {
+    font-size: calc(clamp(16px, 4.8vw, 24px) * var(--ytct-font-scale));
+  }
+}

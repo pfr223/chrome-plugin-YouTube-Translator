@@ -1,0 +1,36 @@
+{
+  "manifest_version": 3,
+  "name": "YouTube Context Translator",
+  "version": "0.1.0",
+  "description": "Context-aware Simplified Chinese translation overlay for YouTube captions.",
+  "permissions": ["storage"],
+  "host_permissions": [
+    "https://www.youtube.com/*",
+    "https://m.youtube.com/*",
+    "https://generativelanguage.googleapis.com/*",
+    "https://api.deepseek.com/*",
+    "https://openrouter.ai/*"
+  ],
+  "background": {
+    "service_worker": "src/background.js"
+  },
+  "action": {
+    "default_title": "YouTube Context Translator",
+    "default_popup": "src/popup.html"
+  },
+  "options_page": "src/options.html",
+  "web_accessible_resources": [
+    {
+      "resources": ["src/page_bridge.js"],
+      "matches": ["https://www.youtube.com/*", "https://m.youtube.com/*"]
+    }
+  ],
+  "content_scripts": [
+    {
+      "matches": ["https://www.youtube.com/*", "https://m.youtube.com/*"],
+      "js": ["src/core.js", "src/content_script.js"],
+      "css": ["src/content_script.css"],
+      "run_at": "document_idle"
+    }
+  ]
+}

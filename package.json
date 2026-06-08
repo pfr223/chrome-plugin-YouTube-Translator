@@ -1,0 +1,12 @@
+{
+  "name": "youtube-context-translator",
+  "version": "0.1.0",
+  "private": true,
+  "description": "Chrome extension for context-aware Chinese translation of YouTube captions.",
+  "scripts": {
+    "test": "node --test tests/*.test.js"
+  },
+  "engines": {
+    "node": ">=20"
+  }
+}

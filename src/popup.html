@@ -1,0 +1,38 @@
+<!doctype html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>YouTube Context Translator</title>
+    <link rel="stylesheet" href="settings.css" />
+  </head>
+  <body>
+    <main class="popup">
+      <h1>YouTube 字幕同步翻译</h1>
+      <section class="panel">
+        <label class="switch">
+          <input id="enabled" type="checkbox" />
+          启用翻译
+        </label>
+        <label>
+          API
+          <select id="provider">
+            <option value="gemini">Gemini</option>
+            <option value="deepseek">DeepSeek</option>
+            <option value="openrouter">OpenRouter</option>
+          </select>
+        </label>
+        <label>
+          API key
+          <input id="apiKey" type="password" autocomplete="off" placeholder="保存在本机 Chrome" />
+        </label>
+        <p id="status" class="status"></p>
+        <div class="actions">
+          <button id="openOptions" type="button">更多设置</button>
+          <button id="save" class="primary" type="button">保存</button>
+        </div>
+      </section>
+    </main>
+    <script src="popup.js"></script>
+  </body>
+</html>

@@ -1,0 +1,108 @@
+<!doctype html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>YouTube Context Translator 设置</title>
+    <link rel="stylesheet" href="settings.css" />
+  </head>
+  <body>
+    <main>
+      <h1>YouTube 字幕同步翻译设置</h1>
+      <section class="panel">
+        <label class="switch">
+          <input id="enabled" type="checkbox" />
+          启用翻译
+        </label>
+      </section>
+
+      <section class="panel">
+        <h2>API 配置</h2>
+        <div class="tabs" role="tablist" aria-label="API provider">
+          <button class="tab" type="button" data-provider-tab="gemini">Gemini</button>
+          <button class="tab" type="button" data-provider-tab="deepseek">DeepSeek</button>
+          <button class="tab" type="button" data-provider-tab="openrouter">OpenRouter</button>
+        </div>
+
+        <section class="provider-page" data-provider-page="gemini">
+          <label>
+            Gemini API key
+            <input id="geminiApiKey" type="password" autocomplete="off" />
+          </label>
+          <p id="geminiKeyHint" class="hint"></p>
+          <label>
+            Gemini 模型
+            <input id="geminiModel" type="text" spellcheck="false" />
+          </label>
+        </section>
+
+        <section class="provider-page" data-provider-page="deepseek">
+          <label>
+            DeepSeek API key
+            <input id="deepseekApiKey" type="password" autocomplete="off" />
+          </label>
+          <p id="deepseekKeyHint" class="hint"></p>
+          <label>
+            DeepSeek 模型
+            <input id="deepseekModel" type="text" spellcheck="false" />
+          </label>
+        </section>
+
+        <section class="provider-page" data-provider-page="openrouter">
+          <label>
+            OpenRouter API key
+            <input id="openrouterApiKey" type="password" autocomplete="off" />
+          </label>
+          <p id="openrouterKeyHint" class="hint"></p>
+          <label>
+            OpenRouter 模型
+            <input id="openrouterModel" type="text" spellcheck="false" />
+          </label>
+        </section>
+      </section>
+
+      <section class="panel">
+        <h2>翻译行为</h2>
+        <label>
+          上下文字幕条数
+          <input id="contextItems" type="number" min="0" max="20" />
+        </label>
+        <label>
+          翻译偏好
+          <textarea id="customInstructions" spellcheck="false" placeholder="例如：保留 reinforcement learning / bandit / Q value；PAC 翻译为 probably approximately correct；公式和变量不翻译。"></textarea>
+        </label>
+      </section>
+
+      <section class="panel">
+        <h2>字幕显示</h2>
+        <label>
+          <span class="range-label">
+            背景透明度
+            <output id="overlayOpacityValue"></output>
+          </span>
+          <input id="overlayOpacityPercent" type="range" min="0" max="95" step="1" />
+        </label>
+        <label>
+          <span class="range-label">
+            字体大小
+            <output id="overlayFontScaleValue"></output>
+          </span>
+          <input id="overlayFontScalePercent" type="range" min="75" max="150" step="1" />
+        </label>
+        <p class="hint">字幕框可在 YouTube 页面内直接拖拽；拖动后位置会自动保存到本机。</p>
+        <div class="actions split">
+          <button id="resetOverlayPosition" type="button">重置位置</button>
+        </div>
+      </section>
+
+      <section class="panel">
+        <p id="status" class="status"></p>
+        <div class="actions">
+          <button id="test" type="button">测试翻译</button>
+          <button id="save" class="primary" type="button">保存</button>
+        </div>
+      </section>
+    </main>
+    <script src="options.js"></script>
+  </body>
+</html>
