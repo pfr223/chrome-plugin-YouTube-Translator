@@ -3,6 +3,13 @@
   "name": "YouTube Context Translator",
   "version": "0.1.0",
   "description": "Context-aware Simplified Chinese translation overlay for YouTube captions.",
+  "homepage_url": "https://github.com/pfr223/chrome-plugin",
+  "icons": {
+    "16": "assets/icons/icon16.png",
+    "32": "assets/icons/icon32.png",
+    "48": "assets/icons/icon48.png",
+    "128": "assets/icons/icon128.png"
+  },
   "permissions": ["storage"],
   "host_permissions": [
     "https://www.youtube.com/*",
