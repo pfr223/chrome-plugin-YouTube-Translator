@@ -215,6 +215,130 @@ test("adds ML AI RL course guidance to translation prompts", () => {
   assert.match(batchPrompt, /ML\/AI\/RL course lecture/);
 });
 
+test("builds semantic translation segments without changing cue timing", () => {
+  const segments = core.buildTranslationSegmentsFromCues([
+    { id: "cue-0", start: 1, end: 1.8, source: "in reinforcement" },
+    { id: "cue-1", start: 1.8, end: 2.5, source: "learning the agent" },
+    { id: "cue-2", start: 2.5, end: 3.3, source: "takes an action." },
+    { id: "cue-3", start: 4, end: 5, source: "Then we update Q." },
+  ]);
+
+  assert.deepEqual(segments, [
+    {
+      id: "segment-0",
+      start: 1,
+      end: 3.3,
+      sourceRaw: "in reinforcement learning the agent takes an action.",
+      sourceClean: "in reinforcement learning the agent takes an action.",
+      cueIds: ["cue-0", "cue-1", "cue-2"],
+      cues: [
+        {
+          id: "cue-0",
+          start: 1,
+          end: 1.8,
+          sourceRaw: "in reinforcement",
+          sourceClean: "in reinforcement",
+        },
+        {
+          id: "cue-1",
+          start: 1.8,
+          end: 2.5,
+          sourceRaw: "learning the agent",
+          sourceClean: "learning the agent",
+        },
+        {
+          id: "cue-2",
+          start: 2.5,
+          end: 3.3,
+          sourceRaw: "takes an action.",
+          sourceClean: "takes an action.",
+        },
+      ],
+    },
+    {
+      id: "segment-1",
+      start: 4,
+      end: 5,
+      sourceRaw: "Then we update Q.",
+      sourceClean: "Then we update Q.",
+      cueIds: ["cue-3"],
+      cues: [
+        {
+          id: "cue-3",
+          start: 4,
+          end: 5,
+          sourceRaw: "Then we update Q.",
+          sourceClean: "Then we update Q.",
+        },
+      ],
+    },
+  ]);
+});
+
+test("builds segment prompt that asks for cue-level output", () => {
+  const segments = core.buildTranslationSegmentsFromCues([
+    { id: "cue-0", start: 1, end: 1.8, source: "in reinforcement" },
+    { id: "cue-1", start: 1.8, end: 2.6, source: "learning." },
+  ]);
+  const prompt = core.buildSegmentTranslationPrompt({
+    outputSegments: segments,
+    nonOutputContextBefore: [
+      { id: "cue-before", start: 0, end: 1, source: "Today we discuss MDPs." },
+    ],
+    nonOutputContextAfter: [
+      { id: "cue-after", start: 3, end: 4, source: "The reward comes next." },
+    ],
+    videoMemory: {
+      summary: "A reinforcement learning lecture.",
+      glossary: [{ source: "MDP", translation: "MDP" }],
+    },
+    metadata: { title: "RL lecture" },
+    customInstructions: "保留 policy。",
+  });
+
+  assert.match(prompt, /whole segment/);
+  assert.match(prompt, /cue_translations/);
+  assert.match(prompt, /non_output_context_before/);
+  assert.match(prompt, /output_segments/);
+  assert.match(prompt, /non_output_context_after/);
+  assert.match(prompt, /videoMemory/);
+  assert.match(prompt, /segment-0/);
+  assert.match(prompt, /cue-0/);
+  assert.match(prompt, /cue-1/);
+  assert.match(prompt, /A reinforcement learning lecture/);
+  assert.match(prompt, /保留 policy/);
+});
+
+test("parses segment translation response into cue translations", () => {
+  const result = core.parseSegmentTranslationResponse(`Here is JSON:
+  {
+    "segments": [
+      {
+        "id": "segment-0",
+        "clean_source": "in reinforcement learning.",
+        "full_translation": "在强化学习中。",
+        "cue_translations": [
+          {"id": "cue-0", "translation": "在强化"},
+          {"id": "cue-1", "translation": "学习中。"}
+        ]
+      }
+    ]
+  }`);
+
+  assert.deepEqual(result, {
+    cueTranslations: {
+      "cue-0": "在强化",
+      "cue-1": "学习中。",
+    },
+    segmentTranslations: {
+      "segment-0": {
+        cleanSource: "in reinforcement learning.",
+        fullTranslation: "在强化学习中。",
+      },
+    },
+  });
+});
+
 test("creates stable cache keys from provider, model, context, and caption", () => {
   const first = core.createCaptionCacheKey({
     provider: "gemini",
@@ -699,4 +823,15 @@ test("builds and parses batch timeline translations", () => {
     core.parseBatchTranslationResponse('{"translations":[{"id":"cue-0","translation":"你好世界"},{"id":"cue-1","translation":"、Q 值"}]}'),
     { "cue-0": "你好世界", "cue-1": "Q 值" },
   );
+});
+
+test("background batch translation routes through semantic segments", () => {
+  const script = fs.readFileSync(
+    path.join(projectRoot, "src", "background.js"),
+    "utf8",
+  );
+
+  assert.match(script, /core\.buildTranslationSegmentsFromCues/);
+  assert.match(script, /core\.buildSegmentTranslationPrompt/);
+  assert.match(script, /core\.parseSegmentTranslationResponse/);
 });

@@ -229,15 +229,19 @@ async function fetchBatchTranslation(payload) {
     return { translations, provider: settings.provider, model };
   }
 
-  const prompt = core.buildBatchTranslationPrompt({
-    cues: pending,
+  const outputSegments = core.buildTranslationSegmentsFromCues(pending);
+  const prompt = core.buildSegmentTranslationPrompt({
+    outputSegments,
+    nonOutputContextBefore: payload.nonOutputContextBefore || [],
+    nonOutputContextAfter: payload.nonOutputContextAfter || [],
+    videoMemory: payload.videoMemory || {},
     metadata: payload.metadata || {},
     customInstructions: settings.customInstructions,
   });
   const { url, requestOptions } = buildAuthorizedRequest(
     settings,
     prompt,
-    Math.min(8192, 256 + pending.length * 120),
+    Math.min(8192, 512 + pending.length * 140 + outputSegments.length * 180),
   );
   const response = await fetchWithTimeout(url, requestOptions, API_TIMEOUT_MS);
   if (!response.ok) {
@@ -246,7 +250,11 @@ async function fetchBatchTranslation(payload) {
   }
 
   const responseText = await readResponseText(settings.provider, response);
-  const translationMap = core.parseBatchTranslationResponse(responseText);
+  const parsedSegments = core.parseSegmentTranslationResponse(responseText);
+  const translationMap =
+    Object.keys(parsedSegments.cueTranslations).length > 0
+      ? parsedSegments.cueTranslations
+      : core.parseBatchTranslationResponse(responseText);
 
   for (const cue of pending) {
     const translation = core.normalizeCaptionText(translationMap[cue.id]);

@@ -878,6 +878,220 @@
     );
   }
 
+  function hasSentenceEnding(text) {
+    return /[.!?。！？]$/.test(normalizeCaptionText(text));
+  }
+
+  function normalizeTranslationCue(cue) {
+    const id = normalizeCaptionText(cue?.id);
+    const start = roundSeconds(cue?.start);
+    const end = roundSeconds(cue?.end);
+    const sourceRaw = normalizeCaptionText(
+      cue?.sourceRaw || cue?.source || cue?.text || "",
+    );
+    if (!id || !sourceRaw || !Number.isFinite(start) || !Number.isFinite(end)) {
+      return null;
+    }
+    return {
+      id,
+      start,
+      end,
+      sourceRaw,
+      sourceClean: normalizeCaptionText(cue?.sourceClean || sourceRaw),
+    };
+  }
+
+  function buildSegmentFromCues(cues, index) {
+    const normalizedCues = cues.map((cue) => ({
+      id: cue.id,
+      start: cue.start,
+      end: cue.end,
+      sourceRaw: cue.sourceRaw,
+      sourceClean: cue.sourceClean,
+    }));
+    return {
+      id: `segment-${index}`,
+      start: normalizedCues[0].start,
+      end: normalizedCues[normalizedCues.length - 1].end,
+      sourceRaw: normalizeCaptionText(
+        normalizedCues.map((cue) => cue.sourceRaw).join(" "),
+      ),
+      sourceClean: normalizeCaptionText(
+        normalizedCues.map((cue) => cue.sourceClean).join(" "),
+      ),
+      cueIds: normalizedCues.map((cue) => cue.id),
+      cues: normalizedCues,
+    };
+  }
+
+  function buildTranslationSegmentsFromCues(cues, options = {}) {
+    const maxCuesPerSegment = clampInteger(options.maxCuesPerSegment, 1, 10, 5);
+    const maxSegmentChars = clampInteger(options.maxSegmentChars, 80, 600, 220);
+    const maxGapSeconds = Number.isFinite(Number(options.maxGapSeconds))
+      ? Number(options.maxGapSeconds)
+      : 1.2;
+    const normalizedCues = (Array.isArray(cues) ? cues : [])
+      .map(normalizeTranslationCue)
+      .filter(Boolean);
+    const segments = [];
+    let current = [];
+
+    function flush() {
+      if (current.length === 0) {
+        return;
+      }
+      segments.push(buildSegmentFromCues(current, segments.length));
+      current = [];
+    }
+
+    for (const cue of normalizedCues) {
+      const previous = current[current.length - 1];
+      if (
+        previous &&
+        Number.isFinite(maxGapSeconds) &&
+        cue.start - previous.end > maxGapSeconds
+      ) {
+        flush();
+      }
+
+      current.push(cue);
+      const currentText = current.map((item) => item.sourceClean).join(" ");
+      if (
+        hasSentenceEnding(cue.sourceClean) ||
+        current.length >= maxCuesPerSegment ||
+        normalizeCaptionText(currentText).length >= maxSegmentChars
+      ) {
+        flush();
+      }
+    }
+
+    flush();
+    return segments;
+  }
+
+  function compactCueForPrompt(cue) {
+    const normalized = normalizeTranslationCue(cue);
+    if (!normalized) {
+      return null;
+    }
+    return normalized;
+  }
+
+  function buildSegmentTranslationPrompt(options) {
+    const {
+      outputSegments = [],
+      nonOutputContextBefore = [],
+      nonOutputContextAfter = [],
+      videoMemory = {},
+      metadata = {},
+      customInstructions = "",
+    } = options || {};
+    const segments = (Array.isArray(outputSegments) ? outputSegments : [])
+      .filter((segment) => segment && normalizeCaptionText(segment.id));
+    const before = (Array.isArray(nonOutputContextBefore)
+      ? nonOutputContextBefore
+      : [])
+      .map(compactCueForPrompt)
+      .filter(Boolean);
+    const after = (Array.isArray(nonOutputContextAfter)
+      ? nonOutputContextAfter
+      : [])
+      .map(compactCueForPrompt)
+      .filter(Boolean);
+    const compactMemory =
+      videoMemory && typeof videoMemory === "object" ? videoMemory : {};
+    const promptInput = {
+      videoMemory: compactMemory,
+      non_output_context_before: before,
+      output_segments: segments.map((segment) => ({
+        id: normalizeCaptionText(segment.id),
+        start: roundSeconds(segment.start),
+        end: roundSeconds(segment.end),
+        sourceRaw: normalizeCaptionText(segment.sourceRaw),
+        sourceClean: normalizeCaptionText(segment.sourceClean || segment.sourceRaw),
+        cues: (Array.isArray(segment.cues) ? segment.cues : [])
+          .map(compactCueForPrompt)
+          .filter(Boolean),
+      })),
+      non_output_context_after: after,
+    };
+    const lines = [
+      "Task: translate YouTube subtitles into Simplified Chinese by understanding each whole segment, then returning cue-level output.",
+      "Translate each output segment as one complete semantic unit.",
+      "Do not change cue ids or timestamps. Only output translations for output_segments.",
+      "Use clean_source for understanding; keep sourceRaw/sourceClean distinctions intact.",
+      "Keep cue_translations concise enough for the original cue timing.",
+      "",
+      "Default course translation guidance:",
+      ...COURSE_TRANSLATION_GUIDANCE.map((line) => `- ${line}`),
+      "",
+      'Return only JSON in this exact shape: {"segments":[{"id":"segment-0","clean_source":"...","full_translation":"...","cue_translations":[{"id":"cue-0","translation":"..."}]}]}',
+      "",
+      "Video metadata:",
+      `- Title: ${safeLine(metadata.title) || "Unknown"}`,
+      `- Channel: ${safeLine(metadata.channel) || "Unknown"}`,
+      "",
+      "Input JSON:",
+      JSON.stringify(promptInput, null, 2),
+    ];
+
+    if (normalizeCaptionText(customInstructions)) {
+      lines.push("", "User translation preferences:", normalizeCaptionText(customInstructions));
+    }
+
+    return lines.join("\n");
+  }
+
+  function parseSegmentTranslationResponse(text) {
+    const stripped = stripFences(text);
+    const candidates = [stripped];
+    const objectMatch = stripped.match(/\{[\s\S]*"segments"\s*:[\s\S]*\}/);
+    if (objectMatch) {
+      candidates.push(objectMatch[0]);
+    }
+
+    for (const candidate of candidates) {
+      try {
+        const parsed = JSON.parse(candidate);
+        const segments = Array.isArray(parsed?.segments) ? parsed.segments : [];
+        const cueTranslations = {};
+        const segmentTranslations = {};
+
+        segments.forEach((segment) => {
+          const segmentId = normalizeCaptionText(segment?.id);
+          if (segmentId) {
+            segmentTranslations[segmentId] = {
+              cleanSource: normalizeCaptionText(
+                segment.clean_source || segment.cleanSource || "",
+              ),
+              fullTranslation: cleanTranslationText(
+                segment.full_translation || segment.fullTranslation || "",
+              ),
+            };
+          }
+          const cueItems = Array.isArray(segment?.cue_translations)
+            ? segment.cue_translations
+            : Array.isArray(segment?.cueTranslations)
+              ? segment.cueTranslations
+              : [];
+          cueItems.forEach((item) => {
+            const id = normalizeCaptionText(item?.id);
+            const translation = cleanTranslationText(item?.translation);
+            if (id && translation) {
+              cueTranslations[id] = translation;
+            }
+          });
+        });
+
+        return { cueTranslations, segmentTranslations };
+      } catch (_error) {
+        // Try the next candidate.
+      }
+    }
+
+    return { cueTranslations: {}, segmentTranslations: {} };
+  }
+
   function buildBatchTranslationPrompt(options) {
     const {
       cues = [],
@@ -1196,6 +1410,9 @@
     parseTranscriptDomRows,
     findCueAtTime,
     shouldRetryTranscriptDomTimeline,
+    buildTranslationSegmentsFromCues,
+    buildSegmentTranslationPrompt,
+    parseSegmentTranslationResponse,
     normalizeSettings,
     getApiKeyForProvider,
     getModelForProvider,

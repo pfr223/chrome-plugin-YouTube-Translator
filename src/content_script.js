@@ -868,6 +868,43 @@
       .slice(0, TIMELINE_BATCH_SIZE);
   }
 
+  function timelineCuePayload(cue) {
+    return {
+      id: cue.id,
+      start: cue.start,
+      end: cue.end,
+      source: cue.source,
+    };
+  }
+
+  function batchContextForTimeline(batch, contextSize = 4) {
+    if (!Array.isArray(batch) || batch.length === 0) {
+      return {
+        nonOutputContextBefore: [],
+        nonOutputContextAfter: [],
+      };
+    }
+    const firstIndex = state.timeline.findIndex((cue) => cue.id === batch[0].id);
+    const lastIndex = state.timeline.findIndex(
+      (cue) => cue.id === batch[batch.length - 1].id,
+    );
+    if (firstIndex < 0 || lastIndex < 0) {
+      return {
+        nonOutputContextBefore: [],
+        nonOutputContextAfter: [],
+      };
+    }
+
+    return {
+      nonOutputContextBefore: state.timeline
+        .slice(Math.max(0, firstIndex - contextSize), firstIndex)
+        .map(timelineCuePayload),
+      nonOutputContextAfter: state.timeline
+        .slice(lastIndex + 1, lastIndex + 1 + contextSize)
+        .map(timelineCuePayload),
+    };
+  }
+
   async function prefetchTimelineTranslations(options = {}) {
     if (
       state.timelineMode !== "track" ||
@@ -895,17 +932,15 @@
     updateOverlayDiagnostics();
 
     try {
+      const batchContext = batchContextForTimeline(batch);
       const response = await sendMessage(
         {
           type: "YTCT_TRANSLATE_BATCH",
           payload: {
             videoId: state.videoId,
-            cues: batch.map((cue) => ({
-              id: cue.id,
-              start: cue.start,
-              end: cue.end,
-              source: cue.source,
-            })),
+            cues: batch.map(timelineCuePayload),
+            nonOutputContextBefore: batchContext.nonOutputContextBefore,
+            nonOutputContextAfter: batchContext.nonOutputContextAfter,
             metadata: readMetadata(),
           },
         },
