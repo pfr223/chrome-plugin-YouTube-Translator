@@ -29,6 +29,7 @@ function publicSettings(settings) {
     openrouterModel: settings.openrouterModel,
     contextItems: settings.contextItems,
     customInstructions: settings.customInstructions,
+    userGlossary: settings.userGlossary,
     overlayOpacityPercent: settings.overlayOpacityPercent,
     overlayFontScalePercent: settings.overlayFontScalePercent,
     overlayXPercent: settings.overlayXPercent,
@@ -104,11 +105,18 @@ async function fetchTranslation(payload) {
 
   const context = Array.isArray(payload.context) ? payload.context : [];
   const model = core.getModelForProvider(settings);
+  const userGlossary = core.parseUserGlossary(settings.userGlossary);
+  const glossaryVersion = core.createGlossaryVersion(userGlossary);
   const cacheKey = core.createCaptionCacheKey({
     provider: settings.provider,
     model,
     videoId: payload.videoId || "",
     currentText: payload.currentText || "",
+    sourceLanguage: payload.sourceLanguage || "en",
+    targetLanguage: payload.targetLanguage || "zh-CN",
+    promptVersion: core.TRANSLATION_PROMPT_VERSION,
+    glossaryVersion,
+    sourceClean: payload.currentText || "",
     context,
   });
 
@@ -121,6 +129,7 @@ async function fetchTranslation(payload) {
     context,
     metadata: payload.metadata || {},
     customInstructions: settings.customInstructions,
+    userGlossary,
     maxContextItems: settings.contextItems,
   });
   const request = core.buildProviderRequest({
@@ -196,6 +205,9 @@ async function fetchBatchTranslation(payload) {
 
   const model = core.getModelForProvider(settings);
   const videoId = payload.videoId || "";
+  const userGlossary = core.parseUserGlossary(settings.userGlossary);
+  const glossaryVersion = core.createGlossaryVersion(userGlossary);
+  const captionKind = payload.captionKind || "unknown";
   const cues = (Array.isArray(payload.cues) ? payload.cues : [])
     .map((cue) => ({
       id: core.normalizeCaptionText(cue.id),
@@ -204,6 +216,18 @@ async function fetchBatchTranslation(payload) {
       source: core.normalizeCaptionText(cue.source),
     }))
     .filter((cue) => cue.id && cue.source);
+  const sourceSegments = core.buildTranslationSegmentsFromCues(cues, {
+    captionKind,
+  });
+  const cueSegmentMeta = sourceSegments.reduce((result, segment) => {
+    segment.cues.forEach((cue) => {
+      result[cue.id] = {
+        segmentId: segment.id,
+        sourceClean: cue.sourceClean,
+      };
+    });
+    return result;
+  }, {});
 
   const translations = [];
   const pending = [];
@@ -214,6 +238,12 @@ async function fetchBatchTranslation(payload) {
       model,
       videoId,
       currentText: cue.source,
+      sourceLanguage: payload.sourceLanguage || "en",
+      targetLanguage: payload.targetLanguage || "zh-CN",
+      promptVersion: core.TRANSLATION_PROMPT_VERSION,
+      glossaryVersion,
+      segmentId: cueSegmentMeta[cue.id]?.segmentId || "",
+      sourceClean: cueSegmentMeta[cue.id]?.sourceClean || cue.source,
       context: [],
     });
     if (translationCache.has(cacheKey)) {
@@ -231,7 +261,7 @@ async function fetchBatchTranslation(payload) {
   }
 
   const outputSegments = core.buildTranslationSegmentsFromCues(pending, {
-    captionKind: payload.captionKind,
+    captionKind,
   });
   const prompt = core.buildSegmentTranslationPrompt({
     outputSegments,
@@ -240,6 +270,7 @@ async function fetchBatchTranslation(payload) {
     videoMemory: payload.videoMemory || {},
     metadata: payload.metadata || {},
     customInstructions: settings.customInstructions,
+    userGlossary,
   });
   const { url, requestOptions } = buildAuthorizedRequest(
     settings,
@@ -258,9 +289,28 @@ async function fetchBatchTranslation(payload) {
     Object.keys(parsedSegments.cueTranslations).length > 0
       ? parsedSegments.cueTranslations
       : core.parseBatchTranslationResponse(responseText);
+  const videoGlossary = Array.isArray(payload.videoMemory?.glossary)
+    ? payload.videoMemory.glossary
+    : [];
+  const userGlossarySources = new Set(
+    userGlossary.map((item) => item.source.toLowerCase()),
+  );
+  const reviewGlossary = userGlossary.concat(
+    videoGlossary.filter(
+      (item) => !userGlossarySources.has(core.normalizeCaptionText(item.source).toLowerCase()),
+    ),
+  );
+  const consistentTranslationMap = core.applyGlossaryConsistency({
+    cueTranslations: translationMap,
+    cueSources: pending.reduce((result, cue) => {
+      result[cue.id] = cue.source;
+      return result;
+    }, {}),
+    glossary: reviewGlossary,
+  });
 
   for (const cue of pending) {
-    const translation = core.normalizeCaptionText(translationMap[cue.id]);
+    const translation = core.normalizeCaptionText(consistentTranslationMap[cue.id]);
     if (!translation) {
       continue;
     }

@@ -11,11 +11,13 @@
     openrouterModel: "google/gemini-2.5-flash-lite",
     contextItems: 8,
     customInstructions: "",
+    userGlossary: "",
     overlayOpacityPercent: 78,
     overlayFontScalePercent: 100,
     overlayXPercent: 50,
     overlayYPercent: 86,
   });
+  const TRANSLATION_PROMPT_VERSION = "segment-v2";
   const COURSE_TRANSLATION_GUIDANCE = Object.freeze([
     "Assume this is an ML/AI/RL course lecture unless metadata clearly says otherwise.",
     "Translate for a Chinese learner taking technical notes: concise, natural, and synchronized.",
@@ -110,6 +112,8 @@
         typeof value.customInstructions === "string"
           ? value.customInstructions.trim()
           : "",
+      userGlossary:
+        typeof value.userGlossary === "string" ? value.userGlossary.trim() : "",
       overlayOpacityPercent: clampInteger(
         value.overlayOpacityPercent,
         0,
@@ -163,6 +167,55 @@
 
   function safeLine(value) {
     return normalizeCaptionText(value).replace(/\|/g, "/");
+  }
+
+  function stableHash(value) {
+    const text = String(value || "");
+    let hash = 2166136261;
+    for (let index = 0; index < text.length; index += 1) {
+      hash ^= text.charCodeAt(index);
+      hash = Math.imul(hash, 16777619);
+    }
+    return (hash >>> 0).toString(16).padStart(8, "0");
+  }
+
+  function parseUserGlossary(value) {
+    return String(value || "")
+      .split(/\r?\n/)
+      .map((line) => normalizeCaptionText(line))
+      .filter((line) => line && !line.startsWith("#"))
+      .map((line) => {
+        const match = line.match(/^(.+?)(?:=>|->|=|:)(.+)$/);
+        if (!match) {
+          return null;
+        }
+        const source = normalizeCaptionText(match[1]);
+        const target = normalizeCaptionText(match[2]);
+        if (!source || !target) {
+          return null;
+        }
+        return { source, target, locked: true };
+      })
+      .filter(Boolean);
+  }
+
+  function normalizeGlossaryForPrompt(value) {
+    return (Array.isArray(value) ? value : parseUserGlossary(value))
+      .map((item) => ({
+        source: normalizeCaptionText(item?.source || item?.term || ""),
+        target: normalizeCaptionText(
+          item?.target || item?.translation || item?.value || "",
+        ),
+        locked: item?.locked !== false,
+      }))
+      .filter((item) => item.source && item.target);
+  }
+
+  function createGlossaryVersion(value) {
+    const entries = normalizeGlossaryForPrompt(value)
+      .map((item) => `${item.source.toLowerCase()}=${item.target}:${item.locked}`)
+      .sort();
+    return stableHash(entries.join("\n"));
   }
 
   function removeRepeatedAdjacentWords(text) {
@@ -1012,6 +1065,7 @@
       videoMemory = {},
       metadata = {},
       customInstructions = "",
+      userGlossary = [],
     } = options || {};
     const segments = (Array.isArray(outputSegments) ? outputSegments : [])
       .filter((segment) => segment && normalizeCaptionText(segment.id));
@@ -1027,8 +1081,10 @@
       .filter(Boolean);
     const compactMemory =
       videoMemory && typeof videoMemory === "object" ? videoMemory : {};
+    const lockedUserGlossary = normalizeGlossaryForPrompt(userGlossary);
     const promptInput = {
       videoMemory: compactMemory,
+      user_glossary: lockedUserGlossary,
       non_output_context_before: before,
       output_segments: segments.map((segment) => ({
         id: normalizeCaptionText(segment.id),
@@ -1048,6 +1104,7 @@
       "Do not change cue ids or timestamps. Only output translations for output_segments.",
       "Use clean_source for understanding; keep sourceRaw/sourceClean distinctions intact.",
       "Keep cue_translations concise enough for the original cue timing.",
+      "Glossary priority: User glossary > video memory glossary > model default translation.",
       "",
       "Default course translation guidance:",
       ...COURSE_TRANSLATION_GUIDANCE.map((line) => `- ${line}`),
@@ -1348,6 +1405,7 @@
       context = [],
       metadata = {},
       customInstructions = "",
+      userGlossary = [],
       maxContextItems = DEFAULT_SETTINGS.contextItems,
     } = options || {};
 
@@ -1356,6 +1414,7 @@
     const boundedContext = context
       .filter((item) => item && normalizeCaptionText(item.source))
       .slice(-contextLimit);
+    const lockedUserGlossary = normalizeGlossaryForPrompt(userGlossary);
 
     const lines = [
       "Task: translate the current YouTube caption into Simplified Chinese.",
@@ -1371,6 +1430,14 @@
       `- Title: ${safeLine(metadata.title) || "Unknown"}`,
       `- Channel: ${safeLine(metadata.channel) || "Unknown"}`,
       `- URL: ${safeLine(metadata.url) || "Unknown"}`,
+      "",
+      "Glossary priority:",
+      "- User glossary > video memory glossary > model default translation.",
+      "",
+      "User glossary:",
+      lockedUserGlossary.length
+        ? JSON.stringify(lockedUserGlossary)
+        : "[]",
       "",
       "Previous captions:",
     ];
@@ -1456,14 +1523,67 @@
       .join("||");
   }
 
-  function createCaptionCacheKey({ provider, model, videoId, currentText, context }) {
+  function createSourceCleanHash(value) {
+    return stableHash(normalizeCaptionText(value).toLowerCase());
+  }
+
+  function createCaptionCacheKey(options = {}) {
+    const {
+      provider,
+      model,
+      videoId,
+      currentText,
+      context,
+      sourceLanguage = "",
+      targetLanguage = "",
+      promptVersion = "",
+      glossaryVersion = "",
+      segmentId = "",
+      sourceClean = "",
+      sourceCleanHash = "",
+    } = options;
+    const normalizedSourceClean = normalizeCaptionText(sourceClean);
+    const effectiveSourceHash =
+      sourceCleanHash ||
+      (normalizedSourceClean
+        ? createSourceCleanHash(normalizedSourceClean)
+        : normalizeCaptionText(currentText).toLowerCase());
     return [
       provider || "",
       model || "",
       videoId || "",
-      normalizeCaptionText(currentText).toLowerCase(),
+      sourceLanguage || "",
+      targetLanguage || "",
+      promptVersion || "",
+      glossaryVersion || "",
+      segmentId || "",
+      effectiveSourceHash,
       stableContextString(context),
     ].join("::");
+  }
+
+  function applyGlossaryConsistency(options = {}) {
+    const cueTranslations = options.cueTranslations || {};
+    const cueSources = options.cueSources || {};
+    const glossary = normalizeGlossaryForPrompt(options.glossary || [])
+      .filter((item) => item.locked);
+    return Object.entries(cueTranslations).reduce((result, [id, translation]) => {
+      let nextTranslation = cleanTranslationText(translation);
+      const source = normalizeCaptionText(cueSources[id]).toLowerCase();
+      for (const item of glossary) {
+        if (!source.includes(item.source.toLowerCase())) {
+          continue;
+        }
+        if (nextTranslation.toLowerCase().includes(item.target.toLowerCase())) {
+          continue;
+        }
+        nextTranslation = `${nextTranslation} ${item.target}`.trim();
+      }
+      if (id && nextTranslation) {
+        result[id] = nextTranslation;
+      }
+      return result;
+    }, {});
   }
 
   function getYouTubeVideoId(url) {
@@ -1579,7 +1699,12 @@
   const api = {
     DEFAULT_SETTINGS,
     COURSE_TRANSLATION_GUIDANCE,
+    TRANSLATION_PROMPT_VERSION,
     normalizeCaptionText,
+    parseUserGlossary,
+    createGlossaryVersion,
+    createSourceCleanHash,
+    applyGlossaryConsistency,
     extractVisibleCaptionText,
     buildBilingualCaption,
     extractCaptionTracksFromScripts,

@@ -83,6 +83,7 @@ test("normalizes settings with provider-specific defaults and safe bounds", () =
     openrouterModel: "google/gemini-2.5-flash-lite",
     contextItems: 8,
     customInstructions: "",
+    userGlossary: "",
     overlayOpacityPercent: 78,
     overlayFontScalePercent: 100,
     overlayXPercent: 50,
@@ -108,6 +109,10 @@ test("normalizes settings with provider-specific defaults and safe bounds", () =
   assert.equal(
     core.getModelForProvider({ provider: "openrouter", openrouterModel: "openai/gpt-5-mini" }),
     "openai/gpt-5-mini",
+  );
+  assert.equal(
+    core.normalizeSettings({ userGlossary: " policy = policy " }).userGlossary,
+    "policy = policy",
   );
 });
 
@@ -340,6 +345,7 @@ test("builds segment prompt that asks for cue-level output", () => {
     },
     metadata: { title: "RL lecture" },
     customInstructions: "保留 policy。",
+    userGlossary: [{ source: "policy", target: "policy", locked: true }],
   });
 
   assert.match(prompt, /whole segment/);
@@ -352,7 +358,29 @@ test("builds segment prompt that asks for cue-level output", () => {
   assert.match(prompt, /cue-0/);
   assert.match(prompt, /cue-1/);
   assert.match(prompt, /A reinforcement learning lecture/);
+  assert.match(prompt, /user_glossary/);
+  assert.match(prompt, /User glossary > video memory glossary/);
   assert.match(prompt, /保留 policy/);
+});
+
+test("parses user glossary entries with locked priority", () => {
+  assert.deepEqual(
+    core.parseUserGlossary(`
+policy = policy
+regret -> regret
+bandit: bandit（多臂赌博机）
+invalid line
+    `),
+    [
+      { source: "policy", target: "policy", locked: true },
+      { source: "regret", target: "regret", locked: true },
+      { source: "bandit", target: "bandit（多臂赌博机）", locked: true },
+    ],
+  );
+  assert.equal(
+    core.createGlossaryVersion(core.parseUserGlossary("policy = policy")),
+    core.createGlossaryVersion(core.parseUserGlossary(" policy=policy ")),
+  );
 });
 
 test("parses segment translation response into cue translations", () => {
@@ -546,6 +574,56 @@ test("creates stable cache keys from provider, model, context, and caption", () 
   });
 
   assert.equal(first, second);
+});
+
+test("creates versioned translation cache keys from clean source and glossary", () => {
+  const base = {
+    provider: "gemini",
+    model: "gemini-2.5-flash",
+    videoId: "abc",
+    sourceLanguage: "en",
+    targetLanguage: "zh-CN",
+    promptVersion: "segment-v2",
+    glossaryVersion: "g1",
+    segmentId: "segment-1",
+    sourceClean: "Q value is updated.",
+  };
+
+  assert.equal(
+    core.createCaptionCacheKey(base),
+    core.createCaptionCacheKey({ ...base, currentText: "ignored" }),
+  );
+  assert.notEqual(
+    core.createCaptionCacheKey(base),
+    core.createCaptionCacheKey({ ...base, glossaryVersion: "g2" }),
+  );
+  assert.notEqual(
+    core.createCaptionCacheKey(base),
+    core.createCaptionCacheKey({ ...base, sourceClean: "Q value changes." }),
+  );
+});
+
+test("applies locked glossary terms to cue translations conservatively", () => {
+  assert.deepEqual(
+    core.applyGlossaryConsistency({
+      cueTranslations: {
+        "cue-0": "这个政策会更新。",
+        "cue-1": "遗憾值会下降。",
+      },
+      cueSources: {
+        "cue-0": "the policy is updated",
+        "cue-1": "the regret decreases",
+      },
+      glossary: [
+        { source: "policy", target: "policy", locked: true },
+        { source: "regret", target: "regret", locked: true },
+      ],
+    }),
+    {
+      "cue-0": "这个政策会更新。 policy",
+      "cue-1": "遗憾值会下降。 regret",
+    },
+  );
 });
 
 test("builds bilingual caption lines without duplicating empty translations", () => {
@@ -1051,6 +1129,20 @@ test("background exposes video memory analysis pipeline", () => {
   assert.match(script, /core\.mergeVideoMemoryItems/);
 });
 
+test("background uses user glossary, consistency pass, and versioned cache keys", () => {
+  const script = fs.readFileSync(
+    path.join(projectRoot, "src", "background.js"),
+    "utf8",
+  );
+
+  assert.match(script, /core\.parseUserGlossary\(settings\.userGlossary\)/);
+  assert.match(script, /core\.createGlossaryVersion/);
+  assert.match(script, /promptVersion/);
+  assert.match(script, /segmentId/);
+  assert.match(script, /sourceClean/);
+  assert.match(script, /core\.applyGlossaryConsistency/);
+});
+
 test("content script requests video memory and sends it with batches", () => {
   const script = fs.readFileSync(
     path.join(projectRoot, "src", "content_script.js"),
@@ -1061,4 +1153,20 @@ test("content script requests video memory and sends it with batches", () => {
   assert.match(script, /function requestVideoMemoryAnalysis/);
   assert.match(script, /YTCT_ANALYZE_VIDEO_MEMORY/);
   assert.match(script, /videoMemory:\s*state\.videoMemory/);
+});
+
+test("options page exposes user glossary settings", () => {
+  const html = fs.readFileSync(
+    path.join(projectRoot, "src", "options.html"),
+    "utf8",
+  );
+  const script = fs.readFileSync(
+    path.join(projectRoot, "src", "options.js"),
+    "utf8",
+  );
+
+  assert.match(html, /id="userGlossary"/);
+  assert.match(script, /userGlossary:\s*document\.querySelector\("#userGlossary"\)/);
+  assert.match(script, /form\.userGlossary\.value = settings\.userGlossary/);
+  assert.match(script, /userGlossary:\s*form\.userGlossary\.value/);
 });
