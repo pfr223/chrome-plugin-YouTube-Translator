@@ -112,6 +112,27 @@
 
 经验：用户看到滑块变化，会自然期待立即生效。要么自动保存，要么 UI 必须明确标注“保存后生效”。扩展开发中还要区分“扩展已重载”和“页面 content script 已刷新”。
 
+### 4. 非英语字幕出现两个文本框
+
+在印度语、波斯语等非英语视频上，屏幕中同时出现两个字幕框：一个大框在视频上方滚动大量文字，另一个在底部显示当前字幕和中文翻译。英语课程视频不明显，所以一开始容易误判为语言识别、翻译 API 或 Transcript 解析问题。
+
+实际根因更偏 Chrome 扩展生命周期和 DOM 清理：
+
+- 开发过程中多次重载扩展后，旧的 content script、定时器或 `.ytct-overlay` DOM 可能继续留在已打开的 YouTube 页面里。
+- 新 content script 又创建了新的 `.ytct-overlay`，导致两个 overlay 同时渲染。
+- 旧实例可能还处于 DOM fallback 路径，读取到非英语自动字幕或 Transcript 面板文本后，把长文本滚动显示出来。
+- 原生 YouTube 字幕隐藏 CSS 只覆盖 `.caption-window`，对部分新结构的 `.ytp-caption-window-container`、`.ytp-caption-segment` 不够完整。
+
+最终做法：
+
+- 给每次 content script 初始化生成 `YTCT_INSTANCE_ID`。
+- `ensureOverlay()` 前后调用 `removeStaleOverlays()`，清理非当前实例的 `.ytct-overlay`。
+- 当前 overlay 写入 `data-ytct-instance-id`，方便运行态排查。
+- 隐藏 YouTube 原生字幕时，同时覆盖 `.ytp-caption-window-container`、`.caption-window`、`.ytp-caption-segment`。
+- 增加回归测试，防止后续改动重新引入重复 overlay。
+
+经验：扩展热重载后的页面状态不可信。凡是由 content script 创建的全局 DOM 节点，都要能幂等创建、识别当前实例并清理旧实例。调试字幕类插件时，也要同时区分“我们的 overlay”和“YouTube 原生 caption window”。
+
 ## 调试和验证经验
 
 ### 1. 只看截图不够，要读运行态样式
@@ -135,6 +156,14 @@ getComputedStyle(overlay);
 ```
 
 这次最终运行态检查确认：播放器宽 `1765px`，字幕框宽 `1177px`，刚好是 `2/3`；字幕层 parent 是 `BODY`，`position: fixed`，`pointer-events: auto`。
+
+遇到双字幕框时，还要先检查实例数量和来源：
+
+```js
+document.querySelectorAll(".ytct-overlay").length;
+document.querySelectorAll(".html5-video-player .ytp-caption-window-container").length;
+document.querySelector(".ytct-overlay")?.dataset;
+```
 
 经验：视觉问题要用 computed style 和 DOM rect 证明，不要只靠肉眼判断。
 
@@ -166,8 +195,9 @@ getComputedStyle(overlay);
 3. `chrome://extensions` 重载插件
 4. 刷新 YouTube 页面
 5. 刷新设置页
-6. 用 DOM rect 和 computed style 检查运行态
-7. 手动拖拽、调字体、调透明度
+6. 检查 `.ytct-overlay` 数量是否为 1
+7. 用 DOM rect 和 computed style 检查运行态
+8. 手动拖拽、调字体、调透明度
 
 经验：扩展开发的“代码已改”不等于“浏览器页面已运行新代码”。
 
@@ -200,6 +230,7 @@ getComputedStyle(overlay);
 
 - 坐标系、挂载点、宽度参照物要在实现前写清楚。
 - 可拖拽层优先挂 body 或 fullscreen element。
+- content script 创建的 overlay 要幂等，重载后要清理旧实例。
 - 宽度固定为像素，来源可以是视频 rect。
 - `left/top` 用 viewport percent 持久化，适配页面尺寸变化。
 - 动态样式使用 inline style 或 CSS variable，不要被 `!important` 抢优先级。
@@ -217,6 +248,7 @@ getComputedStyle(overlay);
 - 自动字幕质量差时，即使有上下文，LLM 也只能有限修正。
 - 不同地区网络到 DeepSeek、Gemini、OpenRouter 的延迟差异很大，需要本机实测。
 - 其他字幕类插件可能也会操作 caption DOM，存在样式或隐藏原字幕的冲突。
+- YouTube 原生字幕 DOM 结构会随语言、地区、实验版本变化，隐藏选择器需要持续验证。
 - 全屏模式、影院模式、迷你播放器、不同窗口宽度仍需要持续回归测试。
 
 ## 下次开工检查清单
@@ -227,5 +259,6 @@ getComputedStyle(overlay);
 - [ ] 先写回归测试，再改字幕同步或 overlay 行为。
 - [ ] 改完后跑 `npm test` 和 `node --check`。
 - [ ] 重载扩展、刷新 YouTube、刷新设置页。
+- [ ] 确认页面只有一个 `.ytct-overlay`，没有旧 content script 残留。
 - [ ] 用 computed style 和 DOM rect 验证关键 UI。
 - [ ] 手动验证播放中同步、暂停后显示、拖拽、字体、透明度。

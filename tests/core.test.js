@@ -175,6 +175,24 @@ test("keeps overlay draggable outside the player and live-saves display sliders"
   assert.match(options, /scheduleDisplaySettingsSave\(\)/);
 });
 
+test("content script removes stale duplicate subtitle overlays", () => {
+  const script = fs.readFileSync(
+    path.join(projectRoot, "src", "content_script.js"),
+    "utf8",
+  );
+  const css = fs.readFileSync(
+    path.join(projectRoot, "src", "content_script.css"),
+    "utf8",
+  );
+
+  assert.match(script, /YTCT_INSTANCE_ID/);
+  assert.match(script, /function removeStaleOverlays\(\)/);
+  assert.match(script, /querySelectorAll\("\.ytct-overlay"\)/);
+  assert.match(script, /dataset\.ytctInstanceId/);
+  assert.match(script, /\.remove\(\)/);
+  assert.match(css, /ytp-caption-window-container/);
+});
+
 test("adds ML AI RL course guidance to translation prompts", () => {
   const prompt = core.buildTranslationPrompt({
     currentText: "we update the q value using epsilon greedy exploration",

@@ -1,4 +1,6 @@
-.ytct-hide-native-captions .html5-video-player .caption-window {
+.ytct-hide-native-captions .html5-video-player .ytp-caption-window-container,
+.ytct-hide-native-captions .html5-video-player .caption-window,
+.ytct-hide-native-captions .html5-video-player .ytp-caption-segment {
   opacity: 0 !important;
   visibility: hidden !important;
   pointer-events: none !important;

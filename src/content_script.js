@@ -1,5 +1,8 @@
 (function initContentScript() {
   const core = globalThis.YTContextTranslatorCore;
+  const YTCT_INSTANCE_ID = `ytct-${Date.now()}-${Math.random()
+    .toString(36)
+    .slice(2)}`;
   const state = {
     settings: core.normalizeSettings({}),
     hasApiKey: false,
@@ -115,6 +118,14 @@
     return document.fullscreenElement || document.body;
   }
 
+  function removeStaleOverlays() {
+    document.querySelectorAll(".ytct-overlay").forEach((element) => {
+      if (element !== state.overlay) {
+        element.remove();
+      }
+    });
+  }
+
   function applyOverlayStyle() {
     if (!state.overlay) {
       return;
@@ -225,6 +236,7 @@
   }
 
   function ensureOverlay() {
+    removeStaleOverlays();
     const host = getOverlayHost();
     if (!state.overlay || !state.overlay.isConnected) {
       state.overlay = document.createElement("div");
@@ -235,6 +247,7 @@
       state.overlay.addEventListener("pointerup", handleOverlayPointerUp);
       state.overlay.addEventListener("pointercancel", handleOverlayPointerUp);
     }
+    state.overlay.dataset.ytctInstanceId = YTCT_INSTANCE_ID;
     Object.assign(state.overlay.style, {
       display: "flex",
       flexDirection: "column",
@@ -245,6 +258,7 @@
     if (host && state.overlay.parentElement !== host) {
       host.appendChild(state.overlay);
     }
+    removeStaleOverlays();
 
     return state.overlay;
   }
