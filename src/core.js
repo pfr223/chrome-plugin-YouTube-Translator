@@ -1273,6 +1273,38 @@
     ].join("\n");
   }
 
+  function buildVideoMemoryReducePrompt(options) {
+    const {
+      items = [],
+      channelMemory = {},
+      metadata = {},
+    } = options || {};
+    const input = {
+      metadata: {
+        title: normalizeCaptionText(metadata.title),
+        channel: normalizeCaptionText(metadata.channel),
+        description: normalizeCaptionText(metadata.description),
+        playlist: normalizeCaptionText(metadata.playlist),
+        chapters: (Array.isArray(metadata.chapters) ? metadata.chapters : [])
+          .map(normalizeCaptionText)
+          .filter(Boolean),
+      },
+      channelMemory:
+        channelMemory && typeof channelMemory === "object" ? channelMemory : {},
+      mapItems: (Array.isArray(items) ? items : []).map((item) =>
+        mergeVideoMemoryItems([item]),
+      ),
+    };
+    return [
+      "VideoMemory reduce step: merge chunk memories into one compact memory card for subtitle translation.",
+      "Prefer user/course/channel-stable terminology. Keep only facts useful for future segment translation.",
+      'Return only JSON in this exact shape: {"summary":"...","domain":"...","styleGuide":"...","glossary":[{"source":"...","translation":"..."}],"entities":["..."],"asrCorrections":[{"wrong":"...","correct":"..."}]}',
+      "",
+      "Reduce input JSON:",
+      JSON.stringify(input, null, 2),
+    ].join("\n");
+  }
+
   function normalizeGlossaryItems(value) {
     return (Array.isArray(value) ? value : [])
       .map((item) => ({
@@ -1767,6 +1799,7 @@
     parseSegmentTranslationResponse,
     buildVideoMemoryChunks,
     buildVideoMemoryPrompt,
+    buildVideoMemoryReducePrompt,
     parseVideoMemoryResponse,
     mergeVideoMemoryItems,
     normalizeSettings,

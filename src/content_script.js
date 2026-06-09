@@ -366,6 +366,35 @@
     return core.extractVisibleCaptionText(segments);
   }
 
+  function expandMetadataDescription() {
+    return (
+      document.querySelector("#description-inline-expander")?.textContent ||
+      document.querySelector("ytd-text-inline-expander")?.textContent ||
+      document.querySelector("#description")?.textContent ||
+      ""
+    );
+  }
+
+  function readPlaylistTitle() {
+    return (
+      document.querySelector("ytd-playlist-panel-renderer #title")?.textContent ||
+      document.querySelector("ytd-watch-metadata ytd-playlist-byline-renderer")
+        ?.textContent ||
+      ""
+    );
+  }
+
+  function readChapterTitles() {
+    return Array.from(
+      document.querySelectorAll(
+        "ytd-macro-markers-list-item-renderer #details h4, ytd-chapter-renderer #title",
+      ),
+    )
+      .map((element) => core.normalizeCaptionText(element.textContent || ""))
+      .filter(Boolean)
+      .slice(0, 24);
+  }
+
   function readMetadata() {
     const title =
       document.querySelector("h1.ytd-watch-metadata yt-formatted-string")
@@ -381,6 +410,9 @@
     return {
       title: core.normalizeCaptionText(title),
       channel: core.normalizeCaptionText(channel),
+      description: core.normalizeCaptionText(expandMetadataDescription()),
+      playlist: core.normalizeCaptionText(readPlaylistTitle()),
+      chapters: readChapterTitles(),
       url: location.href,
     };
   }

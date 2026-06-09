@@ -610,6 +610,34 @@ test("merges video memory map outputs into a compressed memory", () => {
   );
 });
 
+test("builds video memory reduce prompts with channel memory", () => {
+  const prompt = core.buildVideoMemoryReducePrompt({
+    items: [
+      {
+        summary: "Introduces Q value.",
+        glossary: [{ source: "Q value", translation: "Q 值" }],
+      },
+    ],
+    channelMemory: {
+      summary: "Prior lectures use policy in English.",
+      glossary: [{ source: "policy", translation: "policy" }],
+    },
+    metadata: {
+      title: "RL lecture",
+      description: "A lecture about Bellman equations.",
+      playlist: "RL course",
+      chapters: ["Intro", "Bellman"],
+    },
+  });
+
+  assert.match(prompt, /VideoMemory reduce step/);
+  assert.match(prompt, /channelMemory/);
+  assert.match(prompt, /RL course/);
+  assert.match(prompt, /Bellman equations/);
+  assert.match(prompt, /Q value/);
+  assert.match(prompt, /policy/);
+});
+
 test("creates stable cache keys from provider, model, context, and caption", () => {
   const first = core.createCaptionCacheKey({
     provider: "gemini",
@@ -1178,8 +1206,22 @@ test("background exposes video memory analysis pipeline", () => {
   assert.match(script, /YTCT_ANALYZE_VIDEO_MEMORY/);
   assert.match(script, /core\.buildVideoMemoryChunks/);
   assert.match(script, /core\.buildVideoMemoryPrompt/);
+  assert.match(script, /core\.buildVideoMemoryReducePrompt/);
   assert.match(script, /core\.parseVideoMemoryResponse/);
   assert.match(script, /core\.mergeVideoMemoryItems/);
+});
+
+test("background persists video memory and updates channel memory", () => {
+  const script = fs.readFileSync(
+    path.join(projectRoot, "src", "background.js"),
+    "utf8",
+  );
+
+  assert.match(script, /VIDEO_MEMORY_CACHE_KEY/);
+  assert.match(script, /function videoMemoryCacheKey/);
+  assert.match(script, /async function readVideoMemoryCache/);
+  assert.match(script, /async function writeVideoMemoryCache/);
+  assert.match(script, /channelMemories/);
 });
 
 test("background uses user glossary, consistency pass, and versioned cache keys", () => {
@@ -1206,6 +1248,18 @@ test("content script requests video memory and sends it with batches", () => {
   assert.match(script, /function requestVideoMemoryAnalysis/);
   assert.match(script, /YTCT_ANALYZE_VIDEO_MEMORY/);
   assert.match(script, /videoMemory:\s*state\.videoMemory/);
+});
+
+test("content metadata includes description, playlist, and chapters", () => {
+  const script = fs.readFileSync(
+    path.join(projectRoot, "src", "content_script.js"),
+    "utf8",
+  );
+
+  assert.match(script, /description/);
+  assert.match(script, /playlist/);
+  assert.match(script, /chapters/);
+  assert.match(script, /expandMetadataDescription/);
 });
 
 test("options page exposes user glossary settings", () => {

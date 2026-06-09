@@ -2,6 +2,7 @@ importScripts("core.js");
 
 const core = globalThis.YTContextTranslatorCore;
 const SETTINGS_KEY = "ytContextTranslatorSettings";
+const VIDEO_MEMORY_CACHE_KEY = "ytContextTranslatorVideoMemoryCache";
 const translationCache = new Map();
 const MAX_CACHE_ITEMS = 300;
 const API_TIMEOUT_MS = 18000;
@@ -13,6 +14,44 @@ function storageGet(keys) {
 
 function storageSet(value) {
   return new Promise((resolve) => chrome.storage.local.set(value, resolve));
+}
+
+async function readVideoMemoryCache() {
+  const stored = await storageGet({
+    [VIDEO_MEMORY_CACHE_KEY]: { items: {}, channelMemories: {} },
+  });
+  const cache = stored[VIDEO_MEMORY_CACHE_KEY] || {};
+  return {
+    items: cache.items && typeof cache.items === "object" ? cache.items : {},
+    channelMemories:
+      cache.channelMemories && typeof cache.channelMemories === "object"
+        ? cache.channelMemories
+        : {},
+  };
+}
+
+async function writeVideoMemoryCache(cache) {
+  await storageSet({
+    [VIDEO_MEMORY_CACHE_KEY]: {
+      items: cache?.items || {},
+      channelMemories: cache?.channelMemories || {},
+    },
+  });
+}
+
+function videoMemoryCacheKey({ videoId, model, captionKind, cues }) {
+  const sourceHash = core.createSourceCleanHash(
+    (Array.isArray(cues) ? cues : [])
+      .map((cue) => cue.source || "")
+      .join("\n"),
+  );
+  return [
+    videoId || "",
+    model || "",
+    captionKind || "unknown",
+    core.TRANSLATION_PROMPT_VERSION,
+    sourceHash,
+  ].join("::");
 }
 
 async function getSettings() {
@@ -343,6 +382,28 @@ async function fetchVideoMemory(payload) {
     };
   }
 
+  const model = core.getModelForProvider(settings);
+  const cache = await readVideoMemoryCache();
+  const cacheKey = videoMemoryCacheKey({
+    videoId: payload.videoId || "",
+    model,
+    captionKind: payload.captionKind,
+    cues: payload.cues || [],
+  });
+  if (cache.items[cacheKey]) {
+    return {
+      videoMemory: cache.items[cacheKey],
+      provider: settings.provider,
+      model,
+      cached: true,
+    };
+  }
+
+  const channelKey = core.normalizeCaptionText(payload.metadata?.channel)
+    .toLowerCase();
+  const channelMemory = channelKey
+    ? cache.channelMemories[channelKey] || core.mergeVideoMemoryItems([])
+    : core.mergeVideoMemoryItems([]);
   const chunks = core.buildVideoMemoryChunks(payload.cues || [], {
     captionKind: payload.captionKind,
     chunkSize: 20,
@@ -373,11 +434,42 @@ async function fetchVideoMemory(payload) {
       // Video memory is a quality enhancement; subtitle translation should continue.
     }
   }
+  let videoMemory = core.mergeVideoMemoryItems(items);
+  if (items.length > 0) {
+    const reducePrompt = core.buildVideoMemoryReducePrompt({
+      items,
+      channelMemory,
+      metadata: payload.metadata || {},
+    });
+    const { url, requestOptions } = buildAuthorizedRequest(
+      settings,
+      reducePrompt,
+      1600,
+    );
+    try {
+      const response = await fetchWithTimeout(url, requestOptions, API_TIMEOUT_MS);
+      if (response.ok) {
+        const responseText = await readResponseText(settings.provider, response);
+        videoMemory = core.parseVideoMemoryResponse(responseText);
+      }
+    } catch (_error) {
+      // Fall back to deterministic reduce if the final reduce request fails.
+    }
+  }
+
+  cache.items[cacheKey] = videoMemory;
+  if (channelKey) {
+    cache.channelMemories[channelKey] = core.mergeVideoMemoryItems([
+      channelMemory,
+      videoMemory,
+    ]);
+  }
+  await writeVideoMemoryCache(cache);
 
   return {
-    videoMemory: core.mergeVideoMemoryItems(items),
+    videoMemory,
     provider: settings.provider,
-    model: core.getModelForProvider(settings),
+    model,
   };
 }
 
