@@ -71,10 +71,29 @@
           翻译偏好
           <textarea id="customInstructions" spellcheck="false" placeholder="例如：保留 reinforcement learning / bandit / Q value；PAC 翻译为 probably approximately correct；公式和变量不翻译。"></textarea>
         </label>
+        <label>
+          用户词表
+          <textarea id="userGlossary" spellcheck="false" placeholder="每行一条，例如：policy = policy&#10;regret = regret&#10;bandit = bandit（多臂赌博机）"></textarea>
+        </label>
+        <label>
+          同步策略
+          <select id="syncStrategy">
+            <option value="cue">A：完整句翻译后拆回 cue</option>
+            <option value="segment">B：整句在 segment 时间内显示</option>
+            <option value="hybrid">C：当前 cue + 完整句</option>
+          </select>
+        </label>
       </section>
 
       <section class="panel">
         <h2>字幕显示</h2>
+        <label>
+          原文显示
+          <select id="sourceDisplayMode">
+            <option value="raw">原始 YouTube 字幕</option>
+            <option value="clean">清洗后字幕</option>
+          </select>
+        </label>
         <label>
           <span class="range-label">
             背景透明度

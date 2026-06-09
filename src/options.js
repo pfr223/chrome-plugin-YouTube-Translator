@@ -20,6 +20,9 @@ const form = {
   openrouterModel: document.querySelector("#openrouterModel"),
   contextItems: document.querySelector("#contextItems"),
   customInstructions: document.querySelector("#customInstructions"),
+  userGlossary: document.querySelector("#userGlossary"),
+  syncStrategy: document.querySelector("#syncStrategy"),
+  sourceDisplayMode: document.querySelector("#sourceDisplayMode"),
   overlayOpacityPercent: document.querySelector("#overlayOpacityPercent"),
   overlayOpacityValue: document.querySelector("#overlayOpacityValue"),
   overlayFontScalePercent: document.querySelector("#overlayFontScalePercent"),
@@ -117,6 +120,9 @@ async function loadSettings() {
   form.openrouterModel.value = settings.openrouterModel;
   form.contextItems.value = settings.contextItems;
   form.customInstructions.value = settings.customInstructions || "";
+  form.userGlossary.value = settings.userGlossary || "";
+  form.syncStrategy.value = settings.syncStrategy || "cue";
+  form.sourceDisplayMode.value = settings.sourceDisplayMode || "raw";
   form.overlayOpacityPercent.value = settings.overlayOpacityPercent;
   form.overlayFontScalePercent.value = settings.overlayFontScalePercent;
   state.overlayXPercent = settings.overlayXPercent;
@@ -135,6 +141,9 @@ async function saveSettings() {
     openrouterModel: form.openrouterModel.value,
     contextItems: form.contextItems.value,
     customInstructions: form.customInstructions.value,
+    userGlossary: form.userGlossary.value,
+    syncStrategy: form.syncStrategy.value,
+    sourceDisplayMode: form.sourceDisplayMode.value,
     overlayOpacityPercent: form.overlayOpacityPercent.value,
     overlayFontScalePercent: form.overlayFontScalePercent.value,
     overlayXPercent: state.overlayXPercent,
