@@ -5,6 +5,7 @@ const SETTINGS_KEY = "ytContextTranslatorSettings";
 const translationCache = new Map();
 const MAX_CACHE_ITEMS = 300;
 const API_TIMEOUT_MS = 18000;
+const MAX_VIDEO_MEMORY_CHUNKS = 8;
 
 function storageGet(keys) {
   return new Promise((resolve) => chrome.storage.local.get(keys, resolve));
@@ -275,6 +276,61 @@ async function fetchBatchTranslation(payload) {
   return { translations, provider: settings.provider, model };
 }
 
+async function fetchVideoMemory(payload) {
+  const settings = await getSettings();
+  if (!settings.enabled) {
+    return {
+      skipped: true,
+      reason: "disabled",
+      videoMemory: core.mergeVideoMemoryItems([]),
+    };
+  }
+  if (!core.getApiKeyForProvider(settings)) {
+    return {
+      skipped: true,
+      reason: "missing-api-key",
+      videoMemory: core.mergeVideoMemoryItems([]),
+    };
+  }
+
+  const chunks = core.buildVideoMemoryChunks(payload.cues || [], {
+    captionKind: payload.captionKind,
+    chunkSize: 20,
+    overlap: 2,
+    maxChunks: MAX_VIDEO_MEMORY_CHUNKS,
+  });
+  const items = [];
+
+  for (const chunk of chunks) {
+    const prompt = core.buildVideoMemoryPrompt({
+      chunk,
+      metadata: payload.metadata || {},
+      captionKind: payload.captionKind,
+    });
+    const { url, requestOptions } = buildAuthorizedRequest(
+      settings,
+      prompt,
+      1200,
+    );
+    try {
+      const response = await fetchWithTimeout(url, requestOptions, API_TIMEOUT_MS);
+      if (!response.ok) {
+        continue;
+      }
+      const responseText = await readResponseText(settings.provider, response);
+      items.push(core.parseVideoMemoryResponse(responseText));
+    } catch (_error) {
+      // Video memory is a quality enhancement; subtitle translation should continue.
+    }
+  }
+
+  return {
+    videoMemory: core.mergeVideoMemoryItems(items),
+    provider: settings.provider,
+    model: core.getModelForProvider(settings),
+  };
+}
+
 async function saveSettings(nextSettings) {
   const previous = await getSettings();
   const incoming = { ...(nextSettings || {}) };
@@ -333,6 +389,13 @@ chrome.runtime.onMessage.addListener((message, _sender, sendResponse) => {
 
   if (message.type === "YTCT_TRANSLATE_BATCH") {
     fetchBatchTranslation(message.payload || {})
+      .then((result) => sendResponse({ ok: true, result }))
+      .catch((error) => sendResponse({ ok: false, error: error.message }));
+    return true;
+  }
+
+  if (message.type === "YTCT_ANALYZE_VIDEO_MEMORY") {
+    fetchVideoMemory(message.payload || {})
       .then((result) => sendResponse({ ok: true, result }))
       .catch((error) => sendResponse({ ok: false, error: error.message }));
     return true;

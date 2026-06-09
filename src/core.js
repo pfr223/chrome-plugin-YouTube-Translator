@@ -1119,6 +1119,163 @@
     return { cueTranslations: {}, segmentTranslations: {} };
   }
 
+  function buildVideoMemoryChunks(cues, options = {}) {
+    const chunkSize = clampInteger(options.chunkSize, 1, 50, 20);
+    const overlap = clampInteger(options.overlap, 0, chunkSize - 1, 2);
+    const maxChunks = clampInteger(options.maxChunks, 1, 50, 50);
+    const step = Math.max(1, chunkSize - overlap);
+    const normalizedCues = (Array.isArray(cues) ? cues : [])
+      .map((cue) => normalizeTranslationCue(cue, options))
+      .filter(Boolean);
+    const chunks = [];
+
+    for (
+      let start = 0;
+      start < normalizedCues.length && chunks.length < maxChunks;
+      start += step
+    ) {
+      const end = Math.min(normalizedCues.length, start + chunkSize);
+      chunks.push({
+        id: `memory-chunk-${chunks.length}`,
+        cues: normalizedCues.slice(start, end),
+      });
+      if (end >= normalizedCues.length) {
+        break;
+      }
+    }
+
+    return chunks;
+  }
+
+  function buildVideoMemoryPrompt(options) {
+    const {
+      chunk = {},
+      metadata = {},
+      captionKind = "unknown",
+    } = options || {};
+    const input = {
+      chunkId: normalizeCaptionText(chunk.id),
+      captionKind: normalizeCaptionText(captionKind) || "unknown",
+      cues: (Array.isArray(chunk.cues) ? chunk.cues : [])
+        .map((cue) => normalizeTranslationCue(cue, { captionKind }))
+        .filter(Boolean),
+    };
+    return [
+      "VideoMemory map step: analyze this subtitle chunk for later translation consistency.",
+      "Extract only stable facts that help translate future subtitle segments.",
+      'Return only JSON in this exact shape: {"summary":"...","domain":"...","styleGuide":"...","glossary":[{"source":"...","translation":"..."}],"entities":["..."],"asrCorrections":[{"wrong":"...","correct":"..."}]}',
+      "",
+      "Video metadata:",
+      `- Title: ${safeLine(metadata.title) || "Unknown"}`,
+      `- Channel: ${safeLine(metadata.channel) || "Unknown"}`,
+      "",
+      "Chunk JSON:",
+      JSON.stringify(input, null, 2),
+    ].join("\n");
+  }
+
+  function normalizeGlossaryItems(value) {
+    return (Array.isArray(value) ? value : [])
+      .map((item) => ({
+        source: normalizeCaptionText(item?.source || item?.term || ""),
+        translation: normalizeCaptionText(item?.translation || item?.target || ""),
+      }))
+      .filter((item) => item.source && item.translation);
+  }
+
+  function normalizeAsrCorrections(value) {
+    return (Array.isArray(value) ? value : [])
+      .map((item) => ({
+        wrong: normalizeCaptionText(item?.wrong || item?.source || ""),
+        correct: normalizeCaptionText(item?.correct || item?.target || ""),
+      }))
+      .filter((item) => item.wrong && item.correct);
+  }
+
+  function parseVideoMemoryResponse(text) {
+    const stripped = stripFences(text);
+    const candidates = [stripped];
+    const objectMatch = stripped.match(/\{[\s\S]*"summary"\s*:[\s\S]*\}/);
+    if (objectMatch) {
+      candidates.push(objectMatch[0]);
+    }
+
+    for (const candidate of candidates) {
+      try {
+        const parsed = JSON.parse(candidate);
+        return {
+          summary: normalizeCaptionText(parsed?.summary),
+          domain: normalizeCaptionText(parsed?.domain),
+          styleGuide: normalizeCaptionText(parsed?.styleGuide || parsed?.style_guide),
+          glossary: normalizeGlossaryItems(parsed?.glossary),
+          entities: (Array.isArray(parsed?.entities) ? parsed.entities : [])
+            .map(normalizeCaptionText)
+            .filter(Boolean),
+          asrCorrections: normalizeAsrCorrections(
+            parsed?.asrCorrections || parsed?.asr_corrections,
+          ),
+        };
+      } catch (_error) {
+        // Try the next candidate.
+      }
+    }
+
+    return mergeVideoMemoryItems([]);
+  }
+
+  function uniqueBy(items, keyFn, limit) {
+    const result = [];
+    const seen = new Set();
+    for (const item of items) {
+      const key = keyFn(item);
+      if (!key || seen.has(key)) {
+        continue;
+      }
+      seen.add(key);
+      result.push(item);
+      if (result.length >= limit) {
+        break;
+      }
+    }
+    return result;
+  }
+
+  function mergeVideoMemoryItems(items, options = {}) {
+    const summaryLimit = clampInteger(options.summaryLimit, 80, 1200, 420);
+    const itemLimit = clampInteger(options.itemLimit, 1, 80, 24);
+    const values = Array.isArray(items) ? items : [];
+    return {
+      summary: normalizeCaptionText(
+        values
+          .map((item) => item?.summary)
+          .filter(Boolean)
+          .join(" "),
+      ).slice(0, summaryLimit),
+      domain: normalizeCaptionText(values.find((item) => item?.domain)?.domain),
+      styleGuide: normalizeCaptionText(
+        values.find((item) => item?.styleGuide)?.styleGuide,
+      ),
+      glossary: uniqueBy(
+        values.flatMap((item) => normalizeGlossaryItems(item?.glossary)),
+        (item) => item.source.toLowerCase(),
+        itemLimit,
+      ),
+      entities: uniqueBy(
+        values
+          .flatMap((item) => (Array.isArray(item?.entities) ? item.entities : []))
+          .map(normalizeCaptionText)
+          .filter(Boolean),
+        (item) => item.toLowerCase(),
+        itemLimit,
+      ),
+      asrCorrections: uniqueBy(
+        values.flatMap((item) => normalizeAsrCorrections(item?.asrCorrections)),
+        (item) => item.wrong.toLowerCase(),
+        itemLimit,
+      ),
+    };
+  }
+
   function buildBatchTranslationPrompt(options) {
     const {
       cues = [],
@@ -1441,6 +1598,10 @@
     buildTranslationSegmentsFromCues,
     buildSegmentTranslationPrompt,
     parseSegmentTranslationResponse,
+    buildVideoMemoryChunks,
+    buildVideoMemoryPrompt,
+    parseVideoMemoryResponse,
+    mergeVideoMemoryItems,
     normalizeSettings,
     getApiKeyForProvider,
     getModelForProvider,

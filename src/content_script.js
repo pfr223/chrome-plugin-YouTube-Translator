@@ -16,6 +16,8 @@
     timeline: [],
     timelineMode: "loading",
     captionKind: "unknown",
+    videoMemory: null,
+    videoMemoryInFlight: false,
     timelineTimer: 0,
     timelineLoadToken: 0,
     batchInFlight: false,
@@ -38,6 +40,7 @@
   const MAX_HISTORY_ITEMS = 30;
   const MESSAGE_TIMEOUT_MS = 22000;
   const BATCH_MESSAGE_TIMEOUT_MS = 35000;
+  const VIDEO_MEMORY_MESSAGE_TIMEOUT_MS = 90000;
   const TIMELINE_RENDER_INTERVAL_MS = 180;
   const TIMELINE_BATCH_SIZE = 10;
   const TIMELINE_PREFETCH_CUES = 28;
@@ -731,6 +734,8 @@
     const loadToken = ++state.timelineLoadToken;
     state.timelineMode = "loading";
     state.captionKind = "unknown";
+    state.videoMemory = null;
+    state.videoMemoryInFlight = false;
     state.timeline = [];
     updateOverlayDiagnostics({ timelineError: "" });
     window.clearInterval(state.timelineTimer);
@@ -796,6 +801,7 @@
         captionKind: state.captionKind,
       });
       startTimelineRenderer();
+      requestVideoMemoryAnalysis();
       prefetchTimelineTranslations({ force: true });
     } catch (_error) {
       if (loadToken === state.timelineLoadToken) {
@@ -912,6 +918,50 @@
     };
   }
 
+  async function requestVideoMemoryAnalysis() {
+    if (
+      state.timelineMode !== "track" ||
+      state.videoMemoryInFlight ||
+      !state.settings.enabled ||
+      !state.hasApiKey ||
+      state.timeline.length === 0
+    ) {
+      return;
+    }
+
+    const loadToken = state.timelineLoadToken;
+    state.videoMemoryInFlight = true;
+    try {
+      const response = await sendMessage(
+        {
+          type: "YTCT_ANALYZE_VIDEO_MEMORY",
+          payload: {
+            videoId: state.videoId,
+            cues: state.timeline.map(timelineCuePayload),
+            captionKind: state.captionKind,
+            metadata: readMetadata(),
+          },
+        },
+        VIDEO_MEMORY_MESSAGE_TIMEOUT_MS,
+      );
+      if (loadToken !== state.timelineLoadToken) {
+        return;
+      }
+      state.videoMemory = response?.ok ? response.result?.videoMemory || null : null;
+      updateOverlayDiagnostics({
+        videoMemoryReady: Boolean(state.videoMemory),
+      });
+    } catch (_error) {
+      if (loadToken === state.timelineLoadToken) {
+        state.videoMemory = null;
+      }
+    } finally {
+      if (loadToken === state.timelineLoadToken) {
+        state.videoMemoryInFlight = false;
+      }
+    }
+  }
+
   async function prefetchTimelineTranslations(options = {}) {
     if (
       state.timelineMode !== "track" ||
@@ -949,6 +999,7 @@
             nonOutputContextBefore: batchContext.nonOutputContextBefore,
             nonOutputContextAfter: batchContext.nonOutputContextAfter,
             captionKind: state.captionKind,
+            videoMemory: state.videoMemory,
             metadata: readMetadata(),
           },
         },
@@ -1026,6 +1077,8 @@
     state.timeline = [];
     state.timelineMode = "loading";
     state.captionKind = "unknown";
+    state.videoMemory = null;
+    state.videoMemoryInFlight = false;
     state.batchInFlight = false;
     state.fallbackInFlight = false;
     state.queuedFallbackText = "";

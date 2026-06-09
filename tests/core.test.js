@@ -385,6 +385,150 @@ test("parses segment translation response into cue translations", () => {
   });
 });
 
+test("builds overlapping video memory chunks from cleaned cues", () => {
+  const cues = [
+    { id: "cue-0", start: 0, end: 1, source: "we discuss q learning" },
+    { id: "cue-1", start: 1, end: 2, source: "and mdp." },
+    { id: "cue-2", start: 2, end: 3, source: "the policy changes" },
+    { id: "cue-3", start: 3, end: 4, source: "with reward." },
+    { id: "cue-4", start: 4, end: 5, source: "next topic." },
+  ];
+
+  assert.deepEqual(
+    core.buildVideoMemoryChunks(cues, {
+      captionKind: "asr",
+      chunkSize: 3,
+      overlap: 1,
+    }),
+    [
+      {
+        id: "memory-chunk-0",
+        cues: [
+          {
+            id: "cue-0",
+            start: 0,
+            end: 1,
+            sourceRaw: "we discuss q learning",
+            sourceClean: "we discuss Q-learning",
+          },
+          {
+            id: "cue-1",
+            start: 1,
+            end: 2,
+            sourceRaw: "and mdp.",
+            sourceClean: "and MDP.",
+          },
+          {
+            id: "cue-2",
+            start: 2,
+            end: 3,
+            sourceRaw: "the policy changes",
+            sourceClean: "the policy changes",
+          },
+        ],
+      },
+      {
+        id: "memory-chunk-1",
+        cues: [
+          {
+            id: "cue-2",
+            start: 2,
+            end: 3,
+            sourceRaw: "the policy changes",
+            sourceClean: "the policy changes",
+          },
+          {
+            id: "cue-3",
+            start: 3,
+            end: 4,
+            sourceRaw: "with reward.",
+            sourceClean: "with reward.",
+          },
+          {
+            id: "cue-4",
+            start: 4,
+            end: 5,
+            sourceRaw: "next topic.",
+            sourceClean: "next topic.",
+          },
+        ],
+      },
+    ],
+  );
+});
+
+test("builds and parses video memory analysis prompts", () => {
+  const chunk = core.buildVideoMemoryChunks(
+    [{ id: "cue-0", start: 0, end: 1, source: "q value is updated" }],
+    { captionKind: "asr" },
+  )[0];
+  const prompt = core.buildVideoMemoryPrompt({
+    chunk,
+    metadata: { title: "RL lecture" },
+    captionKind: "asr",
+  });
+  const parsed = core.parseVideoMemoryResponse(`{
+    "summary": "RL update rules.",
+    "domain": "reinforcement learning",
+    "styleGuide": "Use concise subtitle Chinese.",
+    "glossary": [{"source":"Q value","translation":"Q 值"}],
+    "entities": ["Bellman"],
+    "asrCorrections": [{"wrong":"cue value","correct":"Q value"}]
+  }`);
+
+  assert.match(prompt, /VideoMemory map step/);
+  assert.match(prompt, /summary/);
+  assert.match(prompt, /glossary/);
+  assert.match(prompt, /asrCorrections/);
+  assert.match(prompt, /Q value/);
+  assert.deepEqual(parsed, {
+    summary: "RL update rules.",
+    domain: "reinforcement learning",
+    styleGuide: "Use concise subtitle Chinese.",
+    glossary: [{ source: "Q value", translation: "Q 值" }],
+    entities: ["Bellman"],
+    asrCorrections: [{ wrong: "cue value", correct: "Q value" }],
+  });
+});
+
+test("merges video memory map outputs into a compressed memory", () => {
+  assert.deepEqual(
+    core.mergeVideoMemoryItems([
+      {
+        summary: "Introduces bandits.",
+        domain: "reinforcement learning",
+        glossary: [
+          { source: "Q value", translation: "Q 值" },
+          { source: "policy", translation: "策略" },
+        ],
+        entities: ["UCB"],
+        asrCorrections: [{ wrong: "cue value", correct: "Q value" }],
+      },
+      {
+        summary: "Explains regret.",
+        domain: "RL",
+        glossary: [{ source: "Q value", translation: "Q 值" }],
+        entities: ["UCB", "PAC"],
+        asrCorrections: [{ wrong: "empty greedy", correct: "epsilon-greedy" }],
+      },
+    ]),
+    {
+      summary: "Introduces bandits. Explains regret.",
+      domain: "reinforcement learning",
+      styleGuide: "",
+      glossary: [
+        { source: "Q value", translation: "Q 值" },
+        { source: "policy", translation: "策略" },
+      ],
+      entities: ["UCB", "PAC"],
+      asrCorrections: [
+        { wrong: "cue value", correct: "Q value" },
+        { wrong: "empty greedy", correct: "epsilon-greedy" },
+      ],
+    },
+  );
+});
+
 test("creates stable cache keys from provider, model, context, and caption", () => {
   const first = core.createCaptionCacheKey({
     provider: "gemini",
@@ -892,4 +1036,29 @@ test("content script passes caption kind into batch translation", () => {
   assert.match(script, /captionKind/);
   assert.match(script, /track\?\.kind === "asr"/);
   assert.match(script, /captionKind:\s*state\.captionKind/);
+});
+
+test("background exposes video memory analysis pipeline", () => {
+  const script = fs.readFileSync(
+    path.join(projectRoot, "src", "background.js"),
+    "utf8",
+  );
+
+  assert.match(script, /YTCT_ANALYZE_VIDEO_MEMORY/);
+  assert.match(script, /core\.buildVideoMemoryChunks/);
+  assert.match(script, /core\.buildVideoMemoryPrompt/);
+  assert.match(script, /core\.parseVideoMemoryResponse/);
+  assert.match(script, /core\.mergeVideoMemoryItems/);
+});
+
+test("content script requests video memory and sends it with batches", () => {
+  const script = fs.readFileSync(
+    path.join(projectRoot, "src", "content_script.js"),
+    "utf8",
+  );
+
+  assert.match(script, /videoMemory/);
+  assert.match(script, /function requestVideoMemoryAnalysis/);
+  assert.match(script, /YTCT_ANALYZE_VIDEO_MEMORY/);
+  assert.match(script, /videoMemory:\s*state\.videoMemory/);
 });
