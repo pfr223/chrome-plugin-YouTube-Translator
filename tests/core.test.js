@@ -84,6 +84,8 @@ test("normalizes settings with provider-specific defaults and safe bounds", () =
     contextItems: 8,
     customInstructions: "",
     userGlossary: "",
+    sourceDisplayMode: "raw",
+    syncStrategy: "cue",
     overlayOpacityPercent: 78,
     overlayFontScalePercent: 100,
     overlayXPercent: 50,
@@ -113,6 +115,19 @@ test("normalizes settings with provider-specific defaults and safe bounds", () =
   assert.equal(
     core.normalizeSettings({ userGlossary: " policy = policy " }).userGlossary,
     "policy = policy",
+  );
+  assert.equal(
+    core.normalizeSettings({ sourceDisplayMode: "clean" }).sourceDisplayMode,
+    "clean",
+  );
+  assert.equal(
+    core.normalizeSettings({ syncStrategy: "segment" }).syncStrategy,
+    "segment",
+  );
+  assert.equal(
+    core.normalizeSettings({ sourceDisplayMode: "unknown", syncStrategy: "bad" })
+      .syncStrategy,
+    "cue",
   );
 });
 
@@ -1183,6 +1198,7 @@ test("background batch translation routes through semantic segments", () => {
   assert.match(script, /core\.buildTranslationSegmentsFromCues/);
   assert.match(script, /core\.buildSegmentTranslationPrompt/);
   assert.match(script, /core\.parseSegmentTranslationResponse/);
+  assert.match(script, /segmentTranslations/);
   assert.match(script, /captionKind:\s*payload\.captionKind/);
 });
 
@@ -1195,6 +1211,19 @@ test("content script passes caption kind into batch translation", () => {
   assert.match(script, /captionKind/);
   assert.match(script, /track\?\.kind === "asr"/);
   assert.match(script, /captionKind:\s*state\.captionKind/);
+});
+
+test("content script supports source display and sync strategies", () => {
+  const script = fs.readFileSync(
+    path.join(projectRoot, "src", "content_script.js"),
+    "utf8",
+  );
+
+  assert.match(script, /segmentTranslations/);
+  assert.match(script, /function displaySourceForCue/);
+  assert.match(script, /sourceDisplayMode/);
+  assert.match(script, /syncStrategy/);
+  assert.match(script, /完整句/);
 });
 
 test("background exposes video memory analysis pipeline", () => {
@@ -1276,4 +1305,22 @@ test("options page exposes user glossary settings", () => {
   assert.match(script, /userGlossary:\s*document\.querySelector\("#userGlossary"\)/);
   assert.match(script, /form\.userGlossary\.value = settings\.userGlossary/);
   assert.match(script, /userGlossary:\s*form\.userGlossary\.value/);
+});
+
+test("options page exposes source display and sync strategy settings", () => {
+  const html = fs.readFileSync(
+    path.join(projectRoot, "src", "options.html"),
+    "utf8",
+  );
+  const script = fs.readFileSync(
+    path.join(projectRoot, "src", "options.js"),
+    "utf8",
+  );
+
+  assert.match(html, /id="sourceDisplayMode"/);
+  assert.match(html, /id="syncStrategy"/);
+  assert.match(script, /sourceDisplayMode:\s*document\.querySelector\("#sourceDisplayMode"\)/);
+  assert.match(script, /syncStrategy:\s*document\.querySelector\("#syncStrategy"\)/);
+  assert.match(script, /sourceDisplayMode:\s*form\.sourceDisplayMode\.value/);
+  assert.match(script, /syncStrategy:\s*form\.syncStrategy\.value/);
 });

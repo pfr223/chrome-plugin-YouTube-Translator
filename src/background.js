@@ -69,6 +69,8 @@ function publicSettings(settings) {
     contextItems: settings.contextItems,
     customInstructions: settings.customInstructions,
     userGlossary: settings.userGlossary,
+    sourceDisplayMode: settings.sourceDisplayMode,
+    syncStrategy: settings.syncStrategy,
     overlayOpacityPercent: settings.overlayOpacityPercent,
     overlayFontScalePercent: settings.overlayFontScalePercent,
     overlayXPercent: settings.overlayXPercent,
@@ -324,6 +326,7 @@ async function fetchBatchTranslation(payload) {
 
   const responseText = await readResponseText(settings.provider, response);
   const parsedSegments = core.parseSegmentTranslationResponse(responseText);
+  const segmentTranslations = parsedSegments.segmentTranslations || {};
   const translationMap =
     Object.keys(parsedSegments.cueTranslations).length > 0
       ? parsedSegments.cueTranslations
@@ -362,7 +365,14 @@ async function fetchBatchTranslation(payload) {
     translations.push({ id: cue.id, translation });
   }
 
-  return { translations, provider: settings.provider, model };
+  return {
+    translations,
+    segmentTranslations: Object.entries(segmentTranslations).map(
+      ([id, value]) => ({ id, ...value }),
+    ),
+    provider: settings.provider,
+    model,
+  };
 }
 
 async function fetchVideoMemory(payload) {

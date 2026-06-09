@@ -14,6 +14,8 @@
     cache: new Map(),
     videoId: "",
     timeline: [],
+    segments: [],
+    segmentTranslations: {},
     timelineMode: "loading",
     captionKind: "unknown",
     videoMemory: null,
@@ -769,6 +771,8 @@
     state.videoMemory = null;
     state.videoMemoryInFlight = false;
     state.timeline = [];
+    state.segments = [];
+    state.segmentTranslations = {};
     updateOverlayDiagnostics({ timelineError: "" });
     window.clearInterval(state.timelineTimer);
     state.timelineTimer = 0;
@@ -825,6 +829,9 @@
 
       state.captionKind = track?.kind === "asr" ? "asr" : track ? "manual" : "unknown";
       state.timeline = timeline;
+      state.segments = core.buildTranslationSegmentsFromCues(timeline, {
+        captionKind: state.captionKind,
+      });
       state.timelineMode = "track";
       state.lastText = "";
       updateOverlayDiagnostics({
@@ -883,10 +890,11 @@
       return;
     }
 
+    const sourceText = displaySourceForCue(cue);
     if (cue.translation) {
-      renderOverlay(cue.translation, "ready", cue.source);
+      renderOverlay(translationForCue(cue), "ready", sourceText);
     } else {
-      renderOverlay("", "ready", cue.source);
+      renderOverlay("", "ready", sourceText);
     }
 
     prefetchTimelineTranslations();
@@ -948,6 +956,46 @@
         .slice(lastIndex + 1, lastIndex + 1 + contextSize)
         .map(timelineCuePayload),
     };
+  }
+
+  function displaySourceForCue(cue) {
+    if (state.settings.sourceDisplayMode !== "clean") {
+      return cue.source;
+    }
+    return core.cleanCaptionSourceText(cue.source, {
+      captionKind: state.captionKind,
+      restoreFinalPunctuation: false,
+    });
+  }
+
+  function segmentForCue(cue) {
+    return state.segments.find((segment) => segment.cueIds.includes(cue.id)) || null;
+  }
+
+  function fullTranslationForCue(cue) {
+    const segment = segmentForCue(cue);
+    if (!segment) {
+      return "";
+    }
+    return core.normalizeCaptionText(
+      state.segmentTranslations[segment.id]?.fullTranslation,
+    );
+  }
+
+  function translationForCue(cue) {
+    const cueTranslation = core.normalizeCaptionText(cue.translation);
+    const fullTranslation = fullTranslationForCue(cue);
+    if (state.settings.syncStrategy === "segment" && fullTranslation) {
+      return fullTranslation;
+    }
+    if (
+      state.settings.syncStrategy === "hybrid" &&
+      fullTranslation &&
+      fullTranslation !== cueTranslation
+    ) {
+      return `${cueTranslation} 完整句：${fullTranslation}`;
+    }
+    return cueTranslation;
   }
 
   async function requestVideoMemoryAnalysis() {
@@ -1045,6 +1093,19 @@
         result[item.id] = item.translation;
         return result;
       }, {});
+      const segmentTranslationMap = (
+        response?.ok ? response.result?.segmentTranslations || [] : []
+      ).reduce((result, item) => {
+        result[item.id] = {
+          cleanSource: item.cleanSource || "",
+          fullTranslation: item.fullTranslation || "",
+        };
+        return result;
+      }, {});
+      state.segmentTranslations = {
+        ...state.segmentTranslations,
+        ...segmentTranslationMap,
+      };
 
       batch.forEach((cue) => {
         const translation = core.normalizeCaptionText(translationMap[cue.id]);
@@ -1107,6 +1168,8 @@
     state.history = [];
     state.cache.clear();
     state.timeline = [];
+    state.segments = [];
+    state.segmentTranslations = {};
     state.timelineMode = "loading";
     state.captionKind = "unknown";
     state.videoMemory = null;

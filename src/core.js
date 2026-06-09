@@ -12,6 +12,8 @@
     contextItems: 8,
     customInstructions: "",
     userGlossary: "",
+    sourceDisplayMode: "raw",
+    syncStrategy: "cue",
     overlayOpacityPercent: 78,
     overlayFontScalePercent: 100,
     overlayXPercent: 50,
@@ -114,6 +116,11 @@
           : "",
       userGlossary:
         typeof value.userGlossary === "string" ? value.userGlossary.trim() : "",
+      sourceDisplayMode: value.sourceDisplayMode === "clean" ? "clean" : "raw",
+      syncStrategy:
+        value.syncStrategy === "segment" || value.syncStrategy === "hybrid"
+          ? value.syncStrategy
+          : "cue",
       overlayOpacityPercent: clampInteger(
         value.overlayOpacityPercent,
         0,
