@@ -1,7 +1,7 @@
 # YouTube Context Translator Chrome Web Store 上架方案
 
 > 调研日期：2026-06-09  
-> 目标仓库：<https://github.com/pfr223/chrome-plugin>  
+> 目标仓库：<https://github.com/pfr223/chrome-plugin-YouTube-Translator>  
 > 当前插件：Chrome MV3，YouTube 英文字幕同步中文翻译，用户自备 API key，支持 Gemini、DeepSeek、OpenRouter。
 
 ## 1. 官方上架要求速览

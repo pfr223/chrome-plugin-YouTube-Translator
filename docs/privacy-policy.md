@@ -70,7 +70,7 @@ YouTube Context Translator 是一个 Chrome 扩展，用于在 YouTube 视频页
 
 如有隐私或支持问题，请通过 GitHub Issues 联系：
 
-<https://github.com/pfr223/chrome-plugin/issues>
+<https://github.com/pfr223/chrome-plugin-YouTube-Translator/issues>
 
 ## 免责声明
 
