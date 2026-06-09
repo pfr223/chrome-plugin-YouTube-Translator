@@ -426,20 +426,6 @@
     return Array.from(document.scripts).map((script) => script.textContent || "");
   }
 
-  function chooseCaptionTrack(tracks) {
-    const usableTracks = (tracks || []).filter((track) => track.baseUrl);
-    return (
-      usableTracks.find(
-        (track) =>
-          track.languageCode === "en" && track.kind !== "asr",
-      ) ||
-      usableTracks.find((track) => track.languageCode === "en") ||
-      usableTracks.find((track) => /^en[-_]/i.test(track.languageCode || "")) ||
-      usableTracks[0] ||
-      null
-    );
-  }
-
   function ensurePageBridge() {
     if (state.pageBridgePromise) {
       return state.pageBridgePromise;
@@ -750,7 +736,12 @@
 
     try {
       const scripts = readPageScripts();
-      const track = chooseCaptionTrack(core.extractCaptionTracksFromScripts(scripts));
+      const tracks = core.extractCaptionTracksFromScripts(scripts);
+      const track = core.chooseCaptionTrack(tracks);
+      if (!track && tracks.some((captionTrack) => captionTrack.baseUrl)) {
+        switchToFallback("no-english-track");
+        return;
+      }
       let result = null;
       let transcriptError = "";
       let timedTextError = track ? "" : "no-track";

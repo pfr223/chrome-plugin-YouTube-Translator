@@ -323,6 +323,30 @@
     return [];
   }
 
+  function chooseCaptionTrack(tracks, options = {}) {
+    const usableTracks = (Array.isArray(tracks) ? tracks : []).filter(
+      (track) => track && track.baseUrl,
+    );
+    const englishTrack =
+      usableTracks.find(
+        (track) =>
+          normalizeCaptionText(track.languageCode).toLowerCase() === "en" &&
+          normalizeCaptionText(track.kind).toLowerCase() !== "asr",
+      ) ||
+      usableTracks.find(
+        (track) =>
+          normalizeCaptionText(track.languageCode).toLowerCase() === "en",
+      ) ||
+      usableTracks.find((track) =>
+        /^en[-_]/i.test(normalizeCaptionText(track.languageCode)),
+      );
+
+    if (englishTrack) {
+      return englishTrack;
+    }
+    return options.allowNonEnglish ? usableTracks[0] || null : null;
+  }
+
   function findNestedValue(rootValue, predicate) {
     const stack = [rootValue];
     const seen = new Set();
@@ -1161,6 +1185,7 @@
     extractVisibleCaptionText,
     buildBilingualCaption,
     extractCaptionTracksFromScripts,
+    chooseCaptionTrack,
     extractYouTubePageConfigFromScripts,
     extractTranscriptParamsFromScripts,
     captionUrlWithFormat,

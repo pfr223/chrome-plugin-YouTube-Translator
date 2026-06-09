@@ -338,6 +338,51 @@ test("extracts YouTube caption tracks from player response scripts", () => {
   assert.equal(tracks[0].baseUrl, "https://www.youtube.com/api/timedtext?v=abc&lang=en");
 });
 
+test("chooses only English caption tracks for timeline mode by default", () => {
+  const tracks = [
+    {
+      baseUrl: "https://www.youtube.com/api/timedtext?v=abc&lang=hi",
+      name: "Hindi",
+      languageCode: "hi",
+      kind: "asr",
+      vssId: "a.hi",
+    },
+    {
+      baseUrl: "https://www.youtube.com/api/timedtext?v=abc&lang=ur",
+      name: "Urdu",
+      languageCode: "ur",
+      kind: "asr",
+      vssId: "a.ur",
+    },
+  ];
+
+  assert.equal(core.chooseCaptionTrack(tracks), null);
+  assert.equal(core.chooseCaptionTrack(tracks, { allowNonEnglish: true }), tracks[0]);
+  assert.equal(
+    core.chooseCaptionTrack([
+      ...tracks,
+      {
+        baseUrl: "https://www.youtube.com/api/timedtext?v=abc&lang=en",
+        name: "English",
+        languageCode: "en",
+        kind: "asr",
+        vssId: "a.en",
+      },
+    ])?.languageCode,
+    "en",
+  );
+});
+
+test("content script falls back to visible captions when only non-English tracks exist", () => {
+  const script = fs.readFileSync(
+    path.join(projectRoot, "src", "content_script.js"),
+    "utf8",
+  );
+
+  assert.match(script, /core\.chooseCaptionTrack\(tracks\)/);
+  assert.match(script, /switchToFallback\("no-english-track"\)/);
+});
+
 test("parses json3 captions into a searchable timeline", () => {
   const cues = core.parseJson3Captions({
     events: [
