@@ -275,6 +275,52 @@ test("builds semantic translation segments without changing cue timing", () => {
   ]);
 });
 
+test("builds sourceClean for ASR cues while preserving sourceRaw", () => {
+  const segments = core.buildTranslationSegmentsFromCues(
+    [
+      {
+        id: "cue-0",
+        start: 1,
+        end: 2,
+        source: "we use q learning",
+      },
+      {
+        id: "cue-1",
+        start: 2,
+        end: 3,
+        source: "and epsilon greedy in mdp.",
+      },
+    ],
+    { captionKind: "asr" },
+  );
+
+  assert.equal(
+    segments[0].sourceRaw,
+    "we use q learning and epsilon greedy in mdp.",
+  );
+  assert.equal(
+    segments[0].sourceClean,
+    "we use Q-learning and epsilon-greedy in MDP.",
+  );
+  assert.deepEqual(
+    segments[0].cues.map((cue) => cue.sourceRaw),
+    ["we use q learning", "and epsilon greedy in mdp."],
+  );
+  assert.deepEqual(
+    segments[0].cues.map((cue) => cue.sourceClean),
+    ["we use Q-learning", "and epsilon-greedy in MDP."],
+  );
+});
+
+test("keeps manual captions on light source cleaning", () => {
+  assert.equal(
+    core.cleanCaptionSourceText("  Q learning   and epsilon greedy  ", {
+      captionKind: "manual",
+    }),
+    "Q learning and epsilon greedy",
+  );
+});
+
 test("builds segment prompt that asks for cue-level output", () => {
   const segments = core.buildTranslationSegmentsFromCues([
     { id: "cue-0", start: 1, end: 1.8, source: "in reinforcement" },
@@ -834,4 +880,16 @@ test("background batch translation routes through semantic segments", () => {
   assert.match(script, /core\.buildTranslationSegmentsFromCues/);
   assert.match(script, /core\.buildSegmentTranslationPrompt/);
   assert.match(script, /core\.parseSegmentTranslationResponse/);
+  assert.match(script, /captionKind:\s*payload\.captionKind/);
+});
+
+test("content script passes caption kind into batch translation", () => {
+  const script = fs.readFileSync(
+    path.join(projectRoot, "src", "content_script.js"),
+    "utf8",
+  );
+
+  assert.match(script, /captionKind/);
+  assert.match(script, /track\?\.kind === "asr"/);
+  assert.match(script, /captionKind:\s*state\.captionKind/);
 });

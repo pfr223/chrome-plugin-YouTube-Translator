@@ -15,6 +15,7 @@
     videoId: "",
     timeline: [],
     timelineMode: "loading",
+    captionKind: "unknown",
     timelineTimer: 0,
     timelineLoadToken: 0,
     batchInFlight: false,
@@ -729,6 +730,7 @@
   async function loadCaptionTimeline() {
     const loadToken = ++state.timelineLoadToken;
     state.timelineMode = "loading";
+    state.captionKind = "unknown";
     state.timeline = [];
     updateOverlayDiagnostics({ timelineError: "" });
     window.clearInterval(state.timelineTimer);
@@ -784,10 +786,15 @@
         return;
       }
 
+      state.captionKind = track?.kind === "asr" ? "asr" : track ? "manual" : "unknown";
       state.timeline = timeline;
       state.timelineMode = "track";
       state.lastText = "";
-      updateOverlayDiagnostics({ timelineError: "", timelineFormat: format });
+      updateOverlayDiagnostics({
+        timelineError: "",
+        timelineFormat: format,
+        captionKind: state.captionKind,
+      });
       startTimelineRenderer();
       prefetchTimelineTranslations({ force: true });
     } catch (_error) {
@@ -941,6 +948,7 @@
             cues: batch.map(timelineCuePayload),
             nonOutputContextBefore: batchContext.nonOutputContextBefore,
             nonOutputContextAfter: batchContext.nonOutputContextAfter,
+            captionKind: state.captionKind,
             metadata: readMetadata(),
           },
         },
@@ -1017,6 +1025,7 @@
     state.cache.clear();
     state.timeline = [];
     state.timelineMode = "loading";
+    state.captionKind = "unknown";
     state.batchInFlight = false;
     state.fallbackInFlight = false;
     state.queuedFallbackText = "";

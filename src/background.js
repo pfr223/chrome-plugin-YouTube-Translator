@@ -229,7 +229,9 @@ async function fetchBatchTranslation(payload) {
     return { translations, provider: settings.provider, model };
   }
 
-  const outputSegments = core.buildTranslationSegmentsFromCues(pending);
+  const outputSegments = core.buildTranslationSegmentsFromCues(pending, {
+    captionKind: payload.captionKind,
+  });
   const prompt = core.buildSegmentTranslationPrompt({
     outputSegments,
     nonOutputContextBefore: payload.nonOutputContextBefore || [],

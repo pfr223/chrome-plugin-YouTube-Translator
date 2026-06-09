@@ -882,7 +882,29 @@
     return /[.!?。！？]$/.test(normalizeCaptionText(text));
   }
 
-  function normalizeTranslationCue(cue) {
+  function cleanCaptionSourceText(value, options = {}) {
+    let text = normalizeCaptionText(value);
+    if (options.captionKind !== "asr") {
+      return text;
+    }
+
+    [
+      [/\bq\s+learning\b/gi, "Q-learning"],
+      [/\bepsilon\s+greedy\b/gi, "epsilon-greedy"],
+      [/\bq\s+value\b/gi, "Q value"],
+      [/\bmdp\b/gi, "MDP"],
+      [/\bpac\b/gi, "PAC"],
+      [/\bucb\b/gi, "UCB"],
+      [/\bsarsa\b/gi, "SARSA"],
+      [/\bdqn\b/gi, "DQN"],
+    ].forEach(([pattern, replacement]) => {
+      text = text.replace(pattern, replacement);
+    });
+
+    return text;
+  }
+
+  function normalizeTranslationCue(cue, options = {}) {
     const id = normalizeCaptionText(cue?.id);
     const start = roundSeconds(cue?.start);
     const end = roundSeconds(cue?.end);
@@ -897,7 +919,12 @@
       start,
       end,
       sourceRaw,
-      sourceClean: normalizeCaptionText(cue?.sourceClean || sourceRaw),
+      sourceClean:
+        typeof cue?.sourceClean === "string"
+          ? normalizeCaptionText(cue.sourceClean)
+          : cleanCaptionSourceText(sourceRaw, {
+              captionKind: cue?.captionKind || options.captionKind,
+            }),
     };
   }
 
@@ -931,7 +958,7 @@
       ? Number(options.maxGapSeconds)
       : 1.2;
     const normalizedCues = (Array.isArray(cues) ? cues : [])
-      .map(normalizeTranslationCue)
+      .map((cue) => normalizeTranslationCue(cue, options))
       .filter(Boolean);
     const segments = [];
     let current = [];
@@ -1410,6 +1437,7 @@
     parseTranscriptDomRows,
     findCueAtTime,
     shouldRetryTranscriptDomTimeline,
+    cleanCaptionSourceText,
     buildTranslationSegmentsFromCues,
     buildSegmentTranslationPrompt,
     parseSegmentTranslationResponse,
