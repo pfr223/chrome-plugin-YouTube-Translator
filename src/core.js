@@ -935,13 +935,30 @@
     return /[.!?。！？]$/.test(normalizeCaptionText(text));
   }
 
+  function hasIncompleteSegmentEnding(text) {
+    return /\b(?:the|a|an|to|of|for|with|and|or|but|because|that|which|is|are|was|were)\.?$/i
+      .test(normalizeCaptionText(text));
+  }
+
+  function countWords(text) {
+    return normalizeCaptionText(text).split(/\s+/).filter(Boolean).length;
+  }
+
   function cleanCaptionSourceText(value, options = {}) {
     let text = normalizeCaptionText(value);
     if (options.captionKind !== "asr") {
       return text;
     }
 
+    text = text
+      .replace(/\b(?:um|uh|you know)\b[,\s]*/gi, " ")
+      .replace(/\s+/g, " ")
+      .trim();
+
     [
+      [/\bmark\s+off\s+decision\s+process\b/gi, "Markov decision process"],
+      [/\btemporal\s+different\s+signal\b/gi, "Temporal-difference signal"],
+      [/\bcue\s+value\b/gi, "Q value"],
       [/\bq\s+learning\b/gi, "Q-learning"],
       [/\bepsilon\s+greedy\b/gi, "epsilon-greedy"],
       [/\bq\s+value\b/gi, "Q value"],
@@ -954,6 +971,10 @@
       text = text.replace(pattern, replacement);
     });
 
+    text = normalizeCaptionText(text);
+    if (options.restoreFinalPunctuation !== false && text && !hasSentenceEnding(text)) {
+      text = `${text}.`;
+    }
     return text;
   }
 
@@ -977,6 +998,7 @@
           ? normalizeCaptionText(cue.sourceClean)
           : cleanCaptionSourceText(sourceRaw, {
               captionKind: cue?.captionKind || options.captionKind,
+              restoreFinalPunctuation: false,
             }),
     };
   }
@@ -1006,7 +1028,11 @@
 
   function buildTranslationSegmentsFromCues(cues, options = {}) {
     const maxCuesPerSegment = clampInteger(options.maxCuesPerSegment, 1, 10, 5);
+    const maxWordsPerSegment = clampInteger(options.maxWordsPerSegment, 4, 80, 45);
     const maxSegmentChars = clampInteger(options.maxSegmentChars, 80, 600, 220);
+    const maxDurationSeconds = Number.isFinite(Number(options.maxDurationSeconds))
+      ? Number(options.maxDurationSeconds)
+      : 12;
     const maxGapSeconds = Number.isFinite(Number(options.maxGapSeconds))
       ? Number(options.maxGapSeconds)
       : 1.2;
@@ -1026,10 +1052,24 @@
 
     for (const cue of normalizedCues) {
       const previous = current[current.length - 1];
+      if (previous) {
+        const nextText = current
+          .map((item) => item.sourceClean)
+          .concat(cue.sourceClean)
+          .join(" ");
+        const nextDuration = cue.end - current[0].start;
+        if (
+          countWords(nextText) > maxWordsPerSegment ||
+          nextDuration > maxDurationSeconds
+        ) {
+          flush();
+        }
+      }
       if (
-        previous &&
+        current.length > 0 &&
         Number.isFinite(maxGapSeconds) &&
-        cue.start - previous.end > maxGapSeconds
+        cue.start - current[current.length - 1].end > maxGapSeconds &&
+        countWords(current.map((item) => item.sourceClean).join(" ")) > 4
       ) {
         flush();
       }
@@ -1037,8 +1077,10 @@
       current.push(cue);
       const currentText = current.map((item) => item.sourceClean).join(" ");
       if (
-        hasSentenceEnding(cue.sourceClean) ||
+        (hasSentenceEnding(cue.sourceClean) &&
+          !hasIncompleteSegmentEnding(currentText)) ||
         current.length >= maxCuesPerSegment ||
+        countWords(currentText) >= maxWordsPerSegment ||
         normalizeCaptionText(currentText).length >= maxSegmentChars
       ) {
         flush();

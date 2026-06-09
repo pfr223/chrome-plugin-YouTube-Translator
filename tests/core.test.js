@@ -326,6 +326,59 @@ test("keeps manual captions on light source cleaning", () => {
   );
 });
 
+test("cleans ASR fillers, casing, punctuation, and common technical errors", () => {
+  assert.equal(
+    core.cleanCaptionSourceText(
+      "um you know mark off decision process and cue value",
+      { captionKind: "asr" },
+    ),
+    "Markov decision process and Q value.",
+  );
+  assert.equal(
+    core.cleanCaptionSourceText("uh temporal different signal", {
+      captionKind: "asr",
+    }),
+    "Temporal-difference signal.",
+  );
+});
+
+test("keeps incomplete segment endings attached to the next cue", () => {
+  const segments = core.buildTranslationSegmentsFromCues([
+    { id: "cue-0", start: 1, end: 2, source: "The first part is the." },
+    { id: "cue-1", start: 2, end: 3, source: "Bellman equation." },
+  ]);
+
+  assert.equal(segments.length, 1);
+  assert.deepEqual(segments[0].cueIds, ["cue-0", "cue-1"]);
+});
+
+test("splits long segments by duration and word count limits", () => {
+  assert.deepEqual(
+    core.buildTranslationSegmentsFromCues(
+      [
+        { id: "cue-0", start: 0, end: 2, source: "one two three" },
+        { id: "cue-1", start: 2, end: 4, source: "four five six" },
+        { id: "cue-2", start: 4, end: 6, source: "seven eight nine" },
+      ],
+      { maxWordsPerSegment: 6, maxDurationSeconds: 10 },
+    ).map((segment) => segment.cueIds),
+    [
+      ["cue-0", "cue-1"],
+      ["cue-2"],
+    ],
+  );
+  assert.deepEqual(
+    core.buildTranslationSegmentsFromCues(
+      [
+        { id: "cue-0", start: 0, end: 6, source: "alpha beta" },
+        { id: "cue-1", start: 6, end: 13, source: "gamma delta" },
+      ],
+      { maxDurationSeconds: 12 },
+    ).map((segment) => segment.cueIds),
+    [["cue-0"], ["cue-1"]],
+  );
+});
+
 test("builds segment prompt that asks for cue-level output", () => {
   const segments = core.buildTranslationSegmentsFromCues([
     { id: "cue-0", start: 1, end: 1.8, source: "in reinforcement" },
