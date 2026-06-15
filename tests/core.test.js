@@ -769,6 +769,27 @@ test("requires summary chapters to cover the full video timeline", () => {
   assert.match(prompt, /Do not stop chapters after the opening or first third/i);
 });
 
+test("builds required chapter anchors across long videos", () => {
+  const cues = Array.from({ length: 720 }, (_item, index) => ({
+    id: `cue-${index}`,
+    start: index * 5,
+    end: index * 5 + 4,
+    source: `minute ${Math.floor((index * 5) / 60)} topic ${Math.floor(index / 12)}`,
+  }));
+
+  const prompt = core.buildVideoSummaryPrompt({
+    cues,
+    metadata: { title: "One hour lecture" },
+  });
+
+  assert.match(prompt, /Required chapter anchors:/);
+  assert.match(prompt, /Return exactly one chapter for each anchor/i);
+  assert.match(prompt, /0 seconds \(00:00\)/);
+  assert.match(prompt, /1080 seconds \(18:00\)/);
+  assert.match(prompt, /2160 seconds \(36:00\)/);
+  assert.match(prompt, /3240 seconds \(54:00\)/);
+});
+
 test("parses provider video summary responses from JSON variants", () => {
   const parsed = core.parseVideoSummaryResponse(
     '```json\n{"summary":"视频介绍 Antigravity 产品线。","highlights":["IDE 支持自动补全","","CLI 可在终端执行"],"chapters":[{"start":-5,"title":"开场","points":["介绍背景",""]},{"start":61.2,"title":"","points":["展示 SDK"]},{"start":"bad","title":"","points":[]}]}\n```',

@@ -24,6 +24,7 @@
     "Preserve formulas, variables, Greek letters, code, citations, and slide labels.",
     "Repair obvious ASR artifacts only when context makes the correction clear; do not invent missing content.",
   ]);
+  const VIDEO_SUMMARY_PROMPT_VERSION = "2026-06-16-chapter-anchors";
   const KNOWN_BAD_GEMINI_MODELS = new Set([
     "gemini-3.1-flash",
     "gemini-3.1-flash-lite",
@@ -1134,6 +1135,39 @@
     };
   }
 
+  function buildSummaryChapterAnchors(cues) {
+    const range = summaryTimelineRange(cues);
+    const rangeStart = Math.max(0, Math.floor(range.start));
+    const rangeEnd = Math.max(rangeStart, Math.floor(range.end));
+    const duration = Math.max(0, rangeEnd - rangeStart);
+    if (duration <= 0) {
+      return [];
+    }
+
+    const chapterCount = duration < 600
+      ? Math.min(4, Math.max(1, Math.ceil(duration / 120)))
+      : Math.min(10, Math.max(5, Math.ceil(duration / 360)));
+    const rawInterval = duration / chapterCount;
+    const roundedInterval = Math.max(
+      1,
+      Math.round(rawInterval / 60) * 60,
+    );
+
+    return Array.from({ length: chapterCount }, (_item, index) => {
+      const start = Math.min(rangeStart + roundedInterval * index, rangeEnd);
+      const nextStart = index + 1 < chapterCount
+        ? rangeStart + roundedInterval * (index + 1)
+        : rangeEnd;
+      return {
+        start,
+        end: Math.max(start, Math.min(nextStart, rangeEnd)),
+      };
+    }).filter((anchor, index, anchors) =>
+      anchor.start < rangeEnd ||
+      index === anchors.length - 1,
+    );
+  }
+
   function buildVideoSummaryPrompt(options = {}) {
     const {
       cues = [],
@@ -1162,6 +1196,7 @@
     const timelineRange = summaryTimelineRange(cues);
     const timelineStart = formatSummaryTimestamp(timelineRange.start);
     const timelineEnd = formatSummaryTimestamp(timelineRange.end);
+    const chapterAnchors = buildSummaryChapterAnchors(cues);
     const lines = [
       "Task: summarize this YouTube video in Simplified Chinese.",
       "Use only the caption content and video metadata. Do not invent details.",
@@ -1182,6 +1217,14 @@
       `- Include a final chapter near ${timelineEnd} when late captions exist.`,
       "- Do not stop chapters after the opening or first third; distribute chapters across early, middle, and late sections.",
       "- short videos may use fewer highlights and chapters but must keep the same JSON shape.",
+      "",
+      "Required chapter anchors:",
+      "- Return exactly one chapter for each anchor below, in the same order.",
+      "- Set each chapter.start to the anchor's seconds value.",
+      "- Summarize content from that anchor until the next anchor; the final anchor covers through the end of the video.",
+      ...chapterAnchors.map((anchor) =>
+        `- ${anchor.start} seconds (${formatSummaryTimestamp(anchor.start)}) covers ${formatSummaryTimestamp(anchor.start)}-${formatSummaryTimestamp(anchor.end)}`,
+      ),
       "",
       "Video metadata:",
       `- Title: ${safeLine(metadata.title) || "Unknown"}`,
@@ -1338,6 +1381,7 @@
       normalizeCaptionText(options.model).toLowerCase(),
       normalizeCaptionText(options.videoId),
       normalizeCaptionText(options.customInstructions).toLowerCase(),
+      VIDEO_SUMMARY_PROMPT_VERSION,
       hashString(transcriptKey),
     ].join("::");
   }
