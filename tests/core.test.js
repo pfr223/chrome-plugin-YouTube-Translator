@@ -700,3 +700,138 @@ test("builds and parses batch timeline translations", () => {
     { "cue-0": "你好世界", "cue-1": "Q 值" },
   );
 });
+
+test("compacts timeline cues for summary with timestamps and character budget", () => {
+  const cues = Array.from({ length: 18 }, (_item, index) => ({
+    id: `cue-${index}`,
+    start: index * 10,
+    end: index * 10 + 4,
+    source: `segment ${index} explains reinforcement learning value updates`,
+  }));
+
+  const compacted = core.compactTimelineForSummary(cues, {
+    maxChars: 500,
+    maxSegmentChars: 90,
+  });
+
+  assert.ok(compacted.length >= 2);
+  assert.ok(compacted.length < cues.length);
+  assert.equal(compacted[0].start, 0);
+  assert.match(compacted[0].text, /segment 0/);
+  assert.match(compacted.at(-1).text, /segment 17/);
+  assert.ok(
+    compacted.reduce((total, segment) => total + segment.text.length, 0) <= 500,
+  );
+});
+
+test("builds video summary prompt from compacted timestamped captions", () => {
+  const prompt = core.buildVideoSummaryPrompt({
+    cues: [
+      { id: "cue-0", start: 0, end: 5, source: "we introduce Antigravity 2.0" },
+      { id: "cue-1", start: 6, end: 12, source: "the IDE, CLI, and SDK share one agent" },
+    ],
+    metadata: {
+      title: "Antigravity demo",
+      channel: "Developer Tools",
+      url: "https://www.youtube.com/watch?v=abc",
+    },
+    customInstructions: "保留 IDE / CLI / SDK。",
+    maxChars: 1000,
+  });
+
+  assert.match(prompt, /summarize this YouTube video/i);
+  assert.match(prompt, /Simplified Chinese/);
+  assert.match(prompt, /Antigravity demo/);
+  assert.match(prompt, /\[00:00-00:05\]/);
+  assert.match(prompt, /IDE, CLI, and SDK/);
+  assert.match(prompt, /"summary"/);
+  assert.match(prompt, /"highlights"/);
+  assert.match(prompt, /"chapters"/);
+  assert.match(prompt, /保留 IDE \/ CLI \/ SDK/);
+});
+
+test("parses provider video summary responses from JSON variants", () => {
+  const parsed = core.parseVideoSummaryResponse(
+    '```json\n{"summary":"视频介绍 Antigravity 产品线。","highlights":["IDE 支持自动补全","","CLI 可在终端执行"],"chapters":[{"start":-5,"title":"开场","points":["介绍背景",""]},{"start":61.2,"title":"","points":["展示 SDK"]},{"start":"bad","title":"","points":[]}]}\n```',
+  );
+
+  assert.deepEqual(parsed, {
+    summary: "视频介绍 Antigravity 产品线。",
+    highlights: ["IDE 支持自动补全", "CLI 可在终端执行"],
+    chapters: [
+      { start: 0, title: "开场", points: ["介绍背景"] },
+      { start: 61.2, title: "", points: ["展示 SDK"] },
+    ],
+  });
+
+  assert.deepEqual(
+    core.parseVideoSummaryResponse(
+      'Here is the result:\n{"summary":"短视频摘要","highlights":["要点"],"chapters":[]}',
+    ),
+    {
+      summary: "短视频摘要",
+      highlights: ["要点"],
+      chapters: [],
+    },
+  );
+});
+
+test("creates stable video summary cache keys from normalized transcript input", () => {
+  const first = core.createVideoSummaryCacheKey({
+    provider: "gemini",
+    model: "gemini-2.5-flash-lite",
+    videoId: "abc",
+    customInstructions: "保留 Q value",
+    cues: [
+      { id: "cue-0", start: 0, end: 4, source: "Q   value is updated" },
+      { id: "cue-1", start: 5, end: 8, source: "policy improves" },
+    ],
+  });
+  const second = core.createVideoSummaryCacheKey({
+    provider: "gemini",
+    model: "gemini-2.5-flash-lite",
+    videoId: "abc",
+    customInstructions: "保留   Q value",
+    cues: [
+      { id: "cue-0", start: 0, end: 4, source: "Q value is updated" },
+      { id: "cue-1", start: 5, end: 8, source: "policy improves" },
+    ],
+  });
+  const changed = core.createVideoSummaryCacheKey({
+    provider: "gemini",
+    model: "gemini-2.5-flash-lite",
+    videoId: "abc",
+    customInstructions: "保留 Q value",
+    cues: [
+      { id: "cue-0", start: 0, end: 4, source: "Q value is updated differently" },
+      { id: "cue-1", start: 5, end: 8, source: "policy improves" },
+    ],
+  });
+
+  assert.equal(first, second);
+  assert.notEqual(first, changed);
+});
+
+test("wires video summary integration points into background and content script", () => {
+  const background = fs.readFileSync(
+    path.join(projectRoot, "src", "background.js"),
+    "utf8",
+  );
+  const script = fs.readFileSync(
+    path.join(projectRoot, "src", "content_script.js"),
+    "utf8",
+  );
+  const css = fs.readFileSync(
+    path.join(projectRoot, "src", "content_script.css"),
+    "utf8",
+  );
+
+  assert.match(background, /summaryCache/);
+  assert.match(background, /YTCT_SUMMARIZE_VIDEO/);
+  assert.match(background, /fetchVideoSummary/);
+  assert.match(script, /ytct-summary-panel/);
+  assert.match(script, /summarizeCurrentVideo/);
+  assert.match(script, /seekToSummaryChapter/);
+  assert.match(script, /YTCT_SUMMARIZE_VIDEO/);
+  assert.match(css, /\.ytct-summary-panel/);
+});
