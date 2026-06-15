@@ -32,11 +32,19 @@
     overlayDragging: false,
     overlayDragPointerId: null,
     lastRenderKey: "",
+    summaryPanel: null,
+    summaryCollapsed: false,
+    summaryStatus: "idle",
+    summaryResult: null,
+    summaryError: "",
+    summaryCached: false,
+    summaryRequestId: 0,
   };
   const MAX_LOCAL_CACHE_ITEMS = 150;
   const MAX_HISTORY_ITEMS = 30;
   const MESSAGE_TIMEOUT_MS = 22000;
   const BATCH_MESSAGE_TIMEOUT_MS = 35000;
+  const SUMMARY_MESSAGE_TIMEOUT_MS = 65000;
   const TIMELINE_RENDER_INTERVAL_MS = 180;
   const TIMELINE_BATCH_SIZE = 10;
   const TIMELINE_PREFETCH_CUES = 28;
@@ -335,6 +343,257 @@
     }
   }
 
+  function createSummaryElement(tagName, className, text) {
+    const element = document.createElement(tagName);
+    if (className) {
+      element.className = className;
+    }
+    if (text !== undefined && text !== null) {
+      element.textContent = text;
+    }
+    return element;
+  }
+
+  function renderSummaryPanel() {
+    const panel = ensureSummaryPanel();
+    const body = panel.querySelector(".ytct-summary-body");
+    const title = panel.querySelector(".ytct-summary-title");
+    const collapseButton = panel.querySelector(
+      "[data-ytct-summary-action='toggle']",
+    );
+    const availability = getSummaryAvailability();
+
+    panel.dataset.status = state.summaryStatus;
+    panel.dataset.collapsed = String(state.summaryCollapsed);
+    title.textContent = "视频总结";
+    collapseButton.textContent = state.summaryCollapsed ? "展开" : "收起";
+
+    if (state.summaryCollapsed) {
+      body.replaceChildren();
+      return;
+    }
+
+    if (state.summaryStatus === "generating") {
+      body.replaceChildren(
+        createSummaryElement("p", "ytct-summary-muted", "正在总结当前视频..."),
+      );
+      return;
+    }
+
+    if (state.summaryStatus === "error") {
+      const message = createSummaryElement(
+        "p",
+        "ytct-summary-error",
+        state.summaryError || "摘要生成失败",
+      );
+      const retry = createSummaryElement("button", "ytct-summary-primary", "重试");
+      retry.type = "button";
+      retry.dataset.ytctSummaryAction = "regenerate";
+      body.replaceChildren(message, retry);
+      return;
+    }
+
+    if (state.summaryResult) {
+      body.replaceChildren(renderSummaryResult(state.summaryResult));
+      return;
+    }
+
+    const hint = createSummaryElement(
+      "p",
+      availability.available ? "ytct-summary-muted" : "ytct-summary-error",
+      availability.available
+        ? "基于完整字幕生成中文摘要、亮点和章节要点。"
+        : availability.reason,
+    );
+    const action = createSummaryElement("button", "ytct-summary-primary", "总结当前视频");
+    action.type = "button";
+    action.disabled = !availability.available;
+    action.dataset.ytctSummaryAction = "generate";
+    body.replaceChildren(hint, action);
+  }
+
+  function renderSummaryResult(summary) {
+    const fragment = document.createDocumentFragment();
+    const actions = createSummaryElement("div", "ytct-summary-actions");
+    const regenerate = createSummaryElement("button", "ytct-summary-primary", "重新生成");
+    regenerate.type = "button";
+    regenerate.dataset.ytctSummaryAction = "regenerate";
+    actions.appendChild(regenerate);
+    if (state.summaryCached) {
+      actions.appendChild(createSummaryElement("span", "ytct-summary-muted", "已使用缓存"));
+    }
+    fragment.appendChild(actions);
+
+    if (summary.summary) {
+      fragment.appendChild(createSummaryElement("h3", "", "摘要"));
+      fragment.appendChild(createSummaryElement("p", "ytct-summary-text", summary.summary));
+    }
+
+    if (summary.highlights?.length) {
+      fragment.appendChild(createSummaryElement("h3", "", "亮点"));
+      const list = createSummaryElement("ul", "ytct-summary-list");
+      summary.highlights.forEach((highlight) => {
+        list.appendChild(createSummaryElement("li", "", highlight));
+      });
+      fragment.appendChild(list);
+    }
+
+    if (summary.chapters?.length) {
+      fragment.appendChild(createSummaryElement("h3", "", "章节要点"));
+      const chapters = createSummaryElement("div", "ytct-summary-chapters");
+      summary.chapters.forEach((chapter) => {
+        const item = createSummaryElement("section", "ytct-summary-chapter");
+        const header = createSummaryElement("div", "ytct-summary-chapter-header");
+        const seek = createSummaryElement(
+          "button",
+          "ytct-summary-time",
+          formatSummaryTime(chapter.start),
+        );
+        seek.type = "button";
+        seek.dataset.ytctSummaryAction = "seek";
+        seek.dataset.start = String(chapter.start);
+        header.appendChild(seek);
+        header.appendChild(createSummaryElement("strong", "", chapter.title || "章节"));
+        item.appendChild(header);
+        if (chapter.points?.length) {
+          const points = createSummaryElement("ul", "ytct-summary-list");
+          chapter.points.forEach((point) => {
+            points.appendChild(createSummaryElement("li", "", point));
+          });
+          item.appendChild(points);
+        }
+        chapters.appendChild(item);
+      });
+      fragment.appendChild(chapters);
+    }
+
+    return fragment;
+  }
+
+  function ensureSummaryPanel() {
+    document.querySelectorAll(".ytct-summary-panel").forEach((element) => {
+      if (element !== state.summaryPanel) {
+        element.remove();
+      }
+    });
+
+    if (!state.summaryPanel || !state.summaryPanel.isConnected) {
+      const panel = document.createElement("aside");
+      panel.className = "ytct-summary-panel";
+      panel.dataset.ytctInstanceId = YTCT_INSTANCE_ID;
+      panel.setAttribute("aria-label", "视频总结");
+
+      const header = createSummaryElement("div", "ytct-summary-header");
+      const title = createSummaryElement("strong", "ytct-summary-title", "视频总结");
+      const toggle = createSummaryElement("button", "ytct-summary-icon-button", "收起");
+      toggle.type = "button";
+      toggle.dataset.ytctSummaryAction = "toggle";
+      header.append(title, toggle);
+
+      const body = createSummaryElement("div", "ytct-summary-body");
+      panel.append(header, body);
+      panel.addEventListener("click", handleSummaryPanelClick);
+      document.body.appendChild(panel);
+      state.summaryPanel = panel;
+    }
+    return state.summaryPanel;
+  }
+
+  function handleSummaryPanelClick(event) {
+    const actionElement = event.target?.closest?.("[data-ytct-summary-action]");
+    if (!actionElement) {
+      return;
+    }
+
+    const action = actionElement.dataset.ytctSummaryAction;
+    if (action === "toggle") {
+      state.summaryCollapsed = !state.summaryCollapsed;
+      renderSummaryPanel();
+      return;
+    }
+    if (action === "generate") {
+      summarizeCurrentVideo(false);
+      return;
+    }
+    if (action === "regenerate") {
+      summarizeCurrentVideo(true);
+      return;
+    }
+    if (action === "seek") {
+      seekToSummaryChapter(Number(actionElement.dataset.start));
+    }
+  }
+
+  function seekToSummaryChapter(start) {
+    const video = getVideo();
+    if (!video || !Number.isFinite(start)) {
+      return;
+    }
+
+    const wasPaused = video.paused;
+    video.currentTime = Math.max(0, start);
+    if (!wasPaused) {
+      video.play().catch(() => {
+        // Browser autoplay rules can reject play after seeking.
+      });
+    }
+  }
+
+  async function summarizeCurrentVideo(force) {
+    const availability = getSummaryAvailability();
+    if (!availability.available) {
+      state.summaryStatus = "error";
+      state.summaryError = availability.reason;
+      renderSummaryPanel();
+      return;
+    }
+
+    const requestId = ++state.summaryRequestId;
+    state.summaryStatus = "generating";
+    state.summaryError = "";
+    state.summaryCached = false;
+    renderSummaryPanel();
+
+    try {
+      const response = await sendMessage(
+        {
+          type: "YTCT_SUMMARIZE_VIDEO",
+          payload: {
+            videoId: state.videoId,
+            metadata: readMetadata(),
+            cues: summaryCuePayload(),
+            force: Boolean(force),
+          },
+        },
+        SUMMARY_MESSAGE_TIMEOUT_MS,
+      );
+
+      if (requestId !== state.summaryRequestId) {
+        return;
+      }
+      if (!response?.ok) {
+        throw new Error(response?.error || "摘要生成失败");
+      }
+      if (response.result?.skipped) {
+        throw new Error("扩展已关闭");
+      }
+
+      state.summaryResult = response.result?.summary || null;
+      state.summaryCached = Boolean(response.result?.cached);
+      state.summaryStatus = state.summaryResult ? "ready" : "error";
+      state.summaryError = state.summaryResult ? "" : "API 没有返回可用摘要";
+    } catch (error) {
+      if (requestId === state.summaryRequestId) {
+        state.summaryStatus = "error";
+        state.summaryError = error.message || "摘要生成失败";
+      }
+    } finally {
+      if (requestId === state.summaryRequestId) {
+        renderSummaryPanel();
+      }
+    }
+  }
+
   function readCaptionText() {
     const segments = Array.from(
       document.querySelectorAll(".html5-video-player .ytp-caption-segment"),
@@ -379,6 +638,45 @@
       channel: core.normalizeCaptionText(channel),
       url: location.href,
     };
+  }
+
+  function formatSummaryTime(seconds) {
+    const totalSeconds = Math.max(0, Math.floor(Number(seconds) || 0));
+    const hours = Math.floor(totalSeconds / 3600);
+    const minutes = Math.floor((totalSeconds % 3600) / 60);
+    const remainingSeconds = totalSeconds % 60;
+    const pad = (value) => String(value).padStart(2, "0");
+    if (hours > 0) {
+      return `${hours}:${pad(minutes)}:${pad(remainingSeconds)}`;
+    }
+    return `${pad(minutes)}:${pad(remainingSeconds)}`;
+  }
+
+  function getSummaryAvailability() {
+    if (!state.settings.enabled) {
+      return { available: false, reason: "扩展已关闭" };
+    }
+    if (!state.hasApiKey) {
+      return { available: false, reason: "请先配置 API key" };
+    }
+    if (state.timelineMode === "loading") {
+      return { available: false, reason: "字幕加载中" };
+    }
+    if (state.timelineMode !== "track" || state.timeline.length === 0) {
+      return { available: false, reason: "当前视频没有可用完整字幕，暂不能总结" };
+    }
+    return { available: true, reason: "" };
+  }
+
+  function summaryCuePayload() {
+    return state.timeline
+      .filter((cue) => cue.source)
+      .map((cue) => ({
+        id: cue.id,
+        start: cue.start,
+        end: cue.end,
+        source: cue.source,
+      }));
   }
 
   function readCaptionTracks() {
@@ -540,6 +838,7 @@
     state.timelineMode = "fallback";
     clearFallbackDebounce();
     updateOverlayDiagnostics({ timelineError: reason || "fallback" });
+    renderSummaryPanel();
     scheduleCaptionCheck();
     window.setTimeout(handleCaptionChange, 0);
   }
@@ -731,6 +1030,7 @@
     state.timelineMode = "loading";
     state.timeline = [];
     updateOverlayDiagnostics({ timelineError: "" });
+    renderSummaryPanel();
     window.clearInterval(state.timelineTimer);
     state.timelineTimer = 0;
 
@@ -790,6 +1090,11 @@
       updateOverlayDiagnostics({ timelineError: "", timelineFormat: format });
       startTimelineRenderer();
       prefetchTimelineTranslations({ force: true });
+      if (state.summaryStatus === "error" && !state.summaryResult) {
+        state.summaryStatus = "idle";
+        state.summaryError = "";
+      }
+      renderSummaryPanel();
     } catch (_error) {
       if (loadToken === state.timelineLoadToken) {
         switchToFallback(_error.message || "load-failed");
@@ -996,6 +1301,12 @@
     window.clearInterval(state.timelineTimer);
     state.timelineTimer = 0;
     state.videoId = core.getYouTubeVideoId(location.href);
+    state.summaryStatus = "idle";
+    state.summaryResult = null;
+    state.summaryError = "";
+    state.summaryCached = false;
+    state.summaryRequestId += 1;
+    renderSummaryPanel();
     renderOverlay("", "ready");
     loadCaptionTimeline();
   }
@@ -1211,6 +1522,12 @@
       state.settings = core.normalizeSettings(message.settings || {});
       state.hasApiKey = Boolean(message.settings?.hasApiKey);
       applyOverlayStyle();
+      state.summaryStatus = "idle";
+      state.summaryResult = null;
+      state.summaryError = "";
+      state.summaryCached = false;
+      state.summaryRequestId += 1;
+      renderSummaryPanel();
       state.timeline.forEach((cue) => {
         cue.translation = "";
         cue.status = "pending";
@@ -1227,6 +1544,8 @@
   refreshSettings().finally(() => {
     state.videoId = core.getYouTubeVideoId(location.href);
     ensureOverlay();
+    ensureSummaryPanel();
+    renderSummaryPanel();
     startObservers();
     loadCaptionTimeline();
   });
