@@ -28,6 +28,7 @@
     "Preserve formulas, variables, Greek letters, code, citations, and slide labels.",
     "Repair obvious ASR artifacts only when context makes the correction clear; do not invent missing content.",
   ]);
+  const VIDEO_SUMMARY_PROMPT_VERSION = "2026-06-16-chapter-anchors";
   const KNOWN_BAD_GEMINI_MODELS = new Set([
     "gemini-3.1-flash",
     "gemini-3.1-flash-lite",
@@ -1480,6 +1481,447 @@
     return {};
   }
 
+  function formatSummaryTimestamp(seconds) {
+    const rawSeconds = Number(seconds);
+    const totalSeconds = Number.isFinite(rawSeconds)
+      ? Math.max(0, Math.floor(rawSeconds))
+      : 0;
+    const hours = Math.floor(totalSeconds / 3600);
+    const minutes = Math.floor((totalSeconds % 3600) / 60);
+    const remainingSeconds = totalSeconds % 60;
+    const pad = (value) => String(value).padStart(2, "0");
+    if (hours > 0) {
+      return `${hours}:${pad(minutes)}:${pad(remainingSeconds)}`;
+    }
+    return `${pad(minutes)}:${pad(remainingSeconds)}`;
+  }
+
+  function normalizedSummaryCues(cues) {
+    return (Array.isArray(cues) ? cues : [])
+      .map((cue) => {
+        const rawStart = Number(cue?.start);
+        const rawEnd = Number(cue?.end);
+        const start = Number.isFinite(rawStart) && rawStart > 0 ? rawStart : 0;
+        const end = Number.isFinite(rawEnd) && rawEnd >= start ? rawEnd : start;
+        return {
+          start,
+          end,
+          source: normalizeCaptionText(cue?.source),
+        };
+      })
+      .filter((cue) => cue.source)
+      .sort((first, second) => first.start - second.start);
+  }
+
+  function limitSummarySegmentText(text, maxChars) {
+    const normalized = normalizeCaptionText(text);
+    if (normalized.length <= maxChars) {
+      return normalized;
+    }
+    if (maxChars <= 3) {
+      return normalized.slice(0, maxChars);
+    }
+    return `${normalized.slice(0, maxChars - 3).trimEnd()}...`;
+  }
+
+  function totalSegmentChars(segments) {
+    return segments.reduce((total, segment) => total + segment.text.length, 0);
+  }
+
+  function trimSelectedSummarySegments(segments, maxChars) {
+    const selected = segments.map((segment) => ({ ...segment }));
+
+    while (selected.length > 2 && totalSegmentChars(selected) > maxChars) {
+      selected.splice(Math.floor(selected.length / 2), 1);
+    }
+
+    let totalChars = totalSegmentChars(selected);
+    if (totalChars <= maxChars || selected.length === 0) {
+      return selected;
+    }
+
+    const perSegmentChars = Math.max(1, Math.floor(maxChars / selected.length));
+    selected.forEach((segment) => {
+      segment.text = limitSummarySegmentText(segment.text, perSegmentChars);
+    });
+
+    totalChars = totalSegmentChars(selected);
+    while (totalChars > maxChars && selected.some((segment) => segment.text)) {
+      const segment = [...selected].reverse().find((item) => item.text);
+      const overflow = totalChars - maxChars;
+      segment.text = segment.text.slice(
+        0,
+        Math.max(0, segment.text.length - overflow),
+      );
+      totalChars = totalSegmentChars(selected);
+    }
+
+    return selected.filter((segment) => segment.text);
+  }
+
+  function compactTimelineForSummary(cues, options = {}) {
+    const maxChars = clampInteger(options.maxChars, 1, 80000, 50000);
+    const maxSegmentChars = clampInteger(options.maxSegmentChars, 20, 2000, 700);
+    const rawMaxMergeGapSeconds = Number(options.maxMergeGapSeconds);
+    const maxMergeGapSeconds = Number.isFinite(rawMaxMergeGapSeconds)
+      ? Math.max(0, rawMaxMergeGapSeconds)
+      : 8;
+    const segments = [];
+
+    for (const cue of normalizedSummaryCues(cues)) {
+      const source = limitSummarySegmentText(cue.source, maxSegmentChars);
+      const end = cue.end || cue.start;
+      const previous = segments.at(-1);
+      const gap = previous ? cue.start - previous.end : 0;
+      const mergedText = previous ? `${previous.text} ${source}`.trim() : source;
+      if (previous && gap <= maxMergeGapSeconds && mergedText.length <= maxSegmentChars) {
+        previous.end = Math.max(previous.end, end);
+        previous.text = mergedText;
+      } else {
+        segments.push({
+          start: cue.start,
+          end,
+          text: source,
+        });
+      }
+    }
+
+    const totalChars = totalSegmentChars(segments);
+    if (totalChars <= maxChars) {
+      return segments;
+    }
+    if (segments.length <= 2) {
+      return trimSelectedSummarySegments(segments, maxChars);
+    }
+
+    const averageSegmentChars = Math.max(1, Math.ceil(totalChars / segments.length));
+    const targetCount = Math.min(
+      segments.length,
+      Math.max(2, Math.floor(maxChars / averageSegmentChars)),
+    );
+    const selectedIndexes = new Set([0, segments.length - 1]);
+
+    for (
+      let step = 1;
+      selectedIndexes.size < targetCount && step < targetCount * 3;
+      step += 1
+    ) {
+      const index = Math.round(
+        (step * (segments.length - 1)) / Math.max(1, targetCount - 1),
+      );
+      selectedIndexes.add(Math.min(segments.length - 1, Math.max(0, index)));
+    }
+
+    const selected = [...selectedIndexes]
+      .sort((first, second) => first - second)
+      .map((index) => segments[index]);
+
+    return trimSelectedSummarySegments(selected, maxChars);
+  }
+
+  function formatSummarySegmentForPrompt(segment) {
+    return `[${formatSummaryTimestamp(segment.start)}-${formatSummaryTimestamp(
+      segment.end,
+    )}] ${safeLine(segment.text)}`;
+  }
+
+  function totalPromptCaptionChars(segments) {
+    return segments.reduce(
+      (total, segment) => total + formatSummarySegmentForPrompt(segment).length + 2,
+      0,
+    );
+  }
+
+  function trimSummarySegmentsForPrompt(segments, maxChars) {
+    const selected = segments.map((segment) => ({ ...segment }));
+
+    while (selected.length > 2 && totalPromptCaptionChars(selected) > maxChars) {
+      selected.splice(Math.floor(selected.length / 2), 1);
+    }
+
+    while (
+      selected.length > 0 &&
+      totalPromptCaptionChars(selected) > maxChars &&
+      selected.some((segment) => segment.text)
+    ) {
+      const longest = selected.reduce((result, segment) =>
+        segment.text.length > result.text.length ? segment : result,
+      );
+      const overflow = totalPromptCaptionChars(selected) - maxChars;
+      longest.text = longest.text.slice(
+        0,
+        Math.max(0, longest.text.length - overflow),
+      );
+    }
+
+    return selected.filter((segment) => normalizeCaptionText(segment.text));
+  }
+
+  function summaryTimelineRange(cues) {
+    const normalized = normalizedSummaryCues(cues);
+    if (normalized.length === 0) {
+      return { start: 0, end: 0 };
+    }
+    return {
+      start: normalized[0].start,
+      end: normalized.reduce(
+        (latest, cue) => Math.max(latest, cue.end || cue.start),
+        normalized[0].end || normalized[0].start,
+      ),
+    };
+  }
+
+  function buildSummaryChapterAnchors(cues) {
+    const range = summaryTimelineRange(cues);
+    const rangeStart = Math.max(0, Math.floor(range.start));
+    const rangeEnd = Math.max(rangeStart, Math.floor(range.end));
+    const duration = Math.max(0, rangeEnd - rangeStart);
+    if (duration <= 0) {
+      return [];
+    }
+
+    const chapterCount = duration < 600
+      ? Math.min(4, Math.max(1, Math.ceil(duration / 120)))
+      : Math.min(10, Math.max(5, Math.ceil(duration / 360)));
+    const rawInterval = duration / chapterCount;
+    const roundedInterval = Math.max(
+      1,
+      Math.round(rawInterval / 60) * 60,
+    );
+
+    return Array.from({ length: chapterCount }, (_item, index) => {
+      const start = Math.min(rangeStart + roundedInterval * index, rangeEnd);
+      const nextStart = index + 1 < chapterCount
+        ? rangeStart + roundedInterval * (index + 1)
+        : rangeEnd;
+      return {
+        start,
+        end: Math.max(start, Math.min(nextStart, rangeEnd)),
+      };
+    }).filter((anchor, index, anchors) =>
+      anchor.start < rangeEnd ||
+      index === anchors.length - 1,
+    );
+  }
+
+  function buildVideoSummaryPrompt(options = {}) {
+    const {
+      cues = [],
+      metadata = {},
+      customInstructions = "",
+      maxChars = 50000,
+      maxSegmentChars = 700,
+      maxMergeGapSeconds,
+    } = options || {};
+    const summaryMaxChars = clampInteger(maxChars, 1, 80000, 50000);
+    const summaryCueCount = normalizedSummaryCues(cues).length;
+    const mergeGap =
+      Number.isFinite(Number(maxMergeGapSeconds))
+        ? maxMergeGapSeconds
+        : summaryCueCount <= 2
+          ? 0.5
+          : undefined;
+    const segments = trimSummarySegmentsForPrompt(
+      compactTimelineForSummary(cues, {
+        maxChars: summaryMaxChars,
+        maxSegmentChars,
+        maxMergeGapSeconds: mergeGap,
+      }),
+      summaryMaxChars,
+    );
+    const timelineRange = summaryTimelineRange(cues);
+    const timelineStart = formatSummaryTimestamp(timelineRange.start);
+    const timelineEnd = formatSummaryTimestamp(timelineRange.end);
+    const chapterAnchors = buildSummaryChapterAnchors(cues);
+    const lines = [
+      "Task: summarize this YouTube video in Simplified Chinese.",
+      "Use only the caption content and video metadata. Do not invent details.",
+      "Write concise course-note style Chinese for a learner reviewing the video.",
+      "Preserve technical terms, code, formulas, variable names, product names, and model names when translating them would reduce clarity.",
+      "",
+      "Default course summarization guidance:",
+      ...COURSE_TRANSLATION_GUIDANCE.map((line) => `- ${line}`),
+      "",
+      'Strict JSON contract: return only {"summary":"...","highlights":["..."],"chapters":[{"start":0,"title":"...","points":["..."]}]}',
+      "",
+      "Output requirements:",
+      "- summary: 150-250 Chinese characters when the video has enough content.",
+      "- highlights: 3-6 concise bullets.",
+      "- chapters: 5-10 timestamped sections when the source is long enough.",
+      "- chapter start values must be seconds and close to real caption timestamps.",
+      `- Timestamp range: ${timelineStart}-${timelineEnd}. Chapters must cover the entire timestamp range, not only the beginning.`,
+      `- Include a final chapter near ${timelineEnd} when late captions exist.`,
+      "- Do not stop chapters after the opening or first third; distribute chapters across early, middle, and late sections.",
+      "- short videos may use fewer highlights and chapters but must keep the same JSON shape.",
+      "",
+      "Required chapter anchors:",
+      "- Return exactly one chapter for each anchor below, in the same order.",
+      "- Set each chapter.start to the anchor's seconds value.",
+      "- Summarize content from that anchor until the next anchor; the final anchor covers through the end of the video.",
+      ...chapterAnchors.map((anchor) =>
+        `- ${anchor.start} seconds (${formatSummaryTimestamp(anchor.start)}) covers ${formatSummaryTimestamp(anchor.start)}-${formatSummaryTimestamp(anchor.end)}`,
+      ),
+      "",
+      "Video metadata:",
+      `- Title: ${safeLine(metadata.title) || "Unknown"}`,
+      `- Channel: ${safeLine(metadata.channel) || "Unknown"}`,
+      `- URL: ${safeLine(metadata.url) || "Unknown"}`,
+      "",
+      "Timestamped captions:",
+    ];
+
+    if (segments.length === 0) {
+      lines.push("- None");
+    } else {
+      segments.forEach((segment) => {
+        lines.push(`- ${formatSummarySegmentForPrompt(segment)}`);
+      });
+    }
+
+    if (normalizeCaptionText(customInstructions)) {
+      lines.push(
+        "",
+        "User translation and summarization preferences:",
+        normalizeCaptionText(customInstructions),
+      );
+    }
+
+    return lines.join("\n");
+  }
+
+  function extractJsonObjectCandidates(text) {
+    const source = String(text || "");
+    const candidates = [];
+
+    for (let start = 0; start < source.length; start += 1) {
+      if (source[start] !== "{") {
+        continue;
+      }
+
+      let depth = 0;
+      let inString = false;
+      let escaped = false;
+      for (let index = start; index < source.length; index += 1) {
+        const char = source[index];
+        if (escaped) {
+          escaped = false;
+          continue;
+        }
+        if (char === "\\") {
+          escaped = true;
+          continue;
+        }
+        if (char === '"') {
+          inString = !inString;
+          continue;
+        }
+        if (inString) {
+          continue;
+        }
+        if (char === "{") {
+          depth += 1;
+        } else if (char === "}") {
+          depth -= 1;
+          if (depth === 0) {
+            const candidate = source.slice(start, index + 1);
+            if (/"(?:summary|highlights|chapters)"\s*:/.test(candidate)) {
+              candidates.push(candidate);
+            }
+            break;
+          }
+        }
+      }
+    }
+
+    return candidates;
+  }
+
+  function normalizeVideoSummary(value) {
+    const cleanSummaryString = (item) =>
+      typeof item === "string" ? cleanTranslationText(item) : "";
+    const summary = cleanSummaryString(value?.summary);
+    const highlights = (Array.isArray(value?.highlights) ? value.highlights : [])
+      .map((item) => cleanSummaryString(item))
+      .filter(Boolean);
+    const chapters = (Array.isArray(value?.chapters) ? value.chapters : [])
+      .map((chapter) => {
+        const rawStart = Number(chapter?.start);
+        const start = Number.isFinite(rawStart) && rawStart > 0 ? rawStart : 0;
+        const title = cleanSummaryString(chapter?.title);
+        const points = (Array.isArray(chapter?.points) ? chapter.points : [])
+          .map((point) => cleanSummaryString(point))
+          .filter(Boolean);
+        return { start, title, points };
+      })
+      .filter((chapter) => chapter.title || chapter.points.length > 0);
+
+    return { summary, highlights, chapters };
+  }
+
+  function parseVideoSummaryResponse(text) {
+    if (typeof text !== "string") {
+      return { summary: "", highlights: [], chapters: [] };
+    }
+    const stripped = stripFences(text);
+    const candidates = [
+      stripped,
+      ...extractJsonObjectCandidates(stripped),
+    ].filter(Boolean);
+    const seen = new Set();
+
+    for (const candidate of candidates) {
+      if (seen.has(candidate)) {
+        continue;
+      }
+      seen.add(candidate);
+      try {
+        const normalized = normalizeVideoSummary(JSON.parse(candidate));
+        if (
+          normalized.summary ||
+          normalized.highlights.length > 0 ||
+          normalized.chapters.length > 0
+        ) {
+          return normalized;
+        }
+      } catch (_error) {
+        // Try the next candidate because providers sometimes wrap JSON in prose.
+      }
+    }
+
+    return { summary: "", highlights: [], chapters: [] };
+  }
+
+  function hashString(value) {
+    let hash = 2166136261;
+    const text = String(value || "");
+    for (let index = 0; index < text.length; index += 1) {
+      hash ^= text.charCodeAt(index);
+      hash = Math.imul(hash, 16777619);
+    }
+    return (hash >>> 0).toString(36);
+  }
+
+  function createVideoSummaryCacheKey(options = {}) {
+    const transcriptKey = normalizedSummaryCues(options.cues)
+      .map((cue) =>
+        [
+          roundSeconds(cue.start),
+          roundSeconds(cue.end),
+          normalizeCaptionText(cue.source).toLowerCase(),
+        ].join(":"),
+      )
+      .join("||");
+
+    return [
+      normalizeCaptionText(options.provider).toLowerCase(),
+      normalizeCaptionText(options.model).toLowerCase(),
+      normalizeCaptionText(options.videoId),
+      normalizeCaptionText(options.customInstructions).toLowerCase(),
+      VIDEO_SUMMARY_PROMPT_VERSION,
+      hashString(transcriptKey),
+    ].join("::");
+  }
+
   function buildTranslationPrompt(options) {
     const {
       currentText,
@@ -1815,6 +2257,10 @@
     buildTranslationPrompt,
     buildBatchTranslationPrompt,
     parseBatchTranslationResponse,
+    compactTimelineForSummary,
+    buildVideoSummaryPrompt,
+    parseVideoSummaryResponse,
+    createVideoSummaryCacheKey,
     extractTranslationFromText,
     extractProviderResponseText,
     parseProviderResponse,

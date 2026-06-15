@@ -40,6 +40,8 @@ git pull --ff-only
 - `src/content_script.js` 优先读取 YouTube Transcript 时间轴，按完整 cue 同步显示双语字幕；必要时才回退到播放器字幕 DOM。
 - `src/background.js` 持有 Gemini、DeepSeek、OpenRouter 各自的 API key 并发起请求，避免把 key 暴露给网页脚本。
 - `src/core.js` 构造带上下文的翻译 prompt，并解析 JSON 或纯文本响应。
+- 页面内「视频总结」面板会复用完整字幕时间轴，用户手动点击后生成当前视频的中文摘要、亮点和可跳转章节要点。
+- 最近字幕原文和译文会进入上下文窗口，用来修正代词、术语、短句省略和技术词。
 - 翻译单位从单个 cue 升级为 `Cue -> Segment -> Translation -> CueTranslation`：短 cue 会先合并成完整语义段，模型按完整句理解，再输出 cue 级译文，原始 YouTube 时间戳不变。
 - 每个 cue 保留 `sourceRaw`，并生成用于翻译的 `sourceClean`。ASR 字幕会做更强的填充词清理、技术术语修正和轻量标点恢复；人工字幕只做轻量规范。
 - 视频打开后会异步构建 `VideoMemory`：按字幕 chunk 做 map 分析，再 reduce 成 summary、domain、styleGuide、glossary、entities、asrCorrections。后续 batch 翻译会携带压缩后的全局记忆和局部前后文。
@@ -91,3 +93,4 @@ node --check src/core.js && node --check src/background.js && node --check src/c
 - 插件只翻译 YouTube 已显示的字幕，不做音频识别。
 - YouTube 页面结构变化可能影响字幕抓取选择器。
 - API key 保存在本机 Chrome storage；不要在共享电脑上保存个人 key。
+- 视频总结需要完整字幕时间轴；如果 YouTube 只暴露当前可见字幕而无法加载完整 transcript，插件不会调用 API 生成摘要。
