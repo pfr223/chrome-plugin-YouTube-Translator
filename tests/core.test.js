@@ -83,6 +83,9 @@ test("normalizes settings with provider-specific defaults and safe bounds", () =
     openrouterModel: "google/gemini-2.5-flash-lite",
     contextItems: 8,
     customInstructions: "",
+    userGlossary: "",
+    sourceDisplayMode: "raw",
+    syncStrategy: "cue",
     overlayOpacityPercent: 78,
     overlayFontScalePercent: 100,
     overlayXPercent: 50,
@@ -108,6 +111,23 @@ test("normalizes settings with provider-specific defaults and safe bounds", () =
   assert.equal(
     core.getModelForProvider({ provider: "openrouter", openrouterModel: "openai/gpt-5-mini" }),
     "openai/gpt-5-mini",
+  );
+  assert.equal(
+    core.normalizeSettings({ userGlossary: " policy = policy " }).userGlossary,
+    "policy = policy",
+  );
+  assert.equal(
+    core.normalizeSettings({ sourceDisplayMode: "clean" }).sourceDisplayMode,
+    "clean",
+  );
+  assert.equal(
+    core.normalizeSettings({ syncStrategy: "segment" }).syncStrategy,
+    "segment",
+  );
+  assert.equal(
+    core.normalizeSettings({ sourceDisplayMode: "unknown", syncStrategy: "bad" })
+      .syncStrategy,
+    "cue",
   );
 });
 
@@ -215,6 +235,424 @@ test("adds ML AI RL course guidance to translation prompts", () => {
   assert.match(batchPrompt, /ML\/AI\/RL course lecture/);
 });
 
+test("builds semantic translation segments without changing cue timing", () => {
+  const segments = core.buildTranslationSegmentsFromCues([
+    { id: "cue-0", start: 1, end: 1.8, source: "in reinforcement" },
+    { id: "cue-1", start: 1.8, end: 2.5, source: "learning the agent" },
+    { id: "cue-2", start: 2.5, end: 3.3, source: "takes an action." },
+    { id: "cue-3", start: 4, end: 5, source: "Then we update Q." },
+  ]);
+
+  assert.deepEqual(segments, [
+    {
+      id: "segment-0",
+      start: 1,
+      end: 3.3,
+      sourceRaw: "in reinforcement learning the agent takes an action.",
+      sourceClean: "in reinforcement learning the agent takes an action.",
+      cueIds: ["cue-0", "cue-1", "cue-2"],
+      cues: [
+        {
+          id: "cue-0",
+          start: 1,
+          end: 1.8,
+          sourceRaw: "in reinforcement",
+          sourceClean: "in reinforcement",
+        },
+        {
+          id: "cue-1",
+          start: 1.8,
+          end: 2.5,
+          sourceRaw: "learning the agent",
+          sourceClean: "learning the agent",
+        },
+        {
+          id: "cue-2",
+          start: 2.5,
+          end: 3.3,
+          sourceRaw: "takes an action.",
+          sourceClean: "takes an action.",
+        },
+      ],
+    },
+    {
+      id: "segment-1",
+      start: 4,
+      end: 5,
+      sourceRaw: "Then we update Q.",
+      sourceClean: "Then we update Q.",
+      cueIds: ["cue-3"],
+      cues: [
+        {
+          id: "cue-3",
+          start: 4,
+          end: 5,
+          sourceRaw: "Then we update Q.",
+          sourceClean: "Then we update Q.",
+        },
+      ],
+    },
+  ]);
+});
+
+test("builds sourceClean for ASR cues while preserving sourceRaw", () => {
+  const segments = core.buildTranslationSegmentsFromCues(
+    [
+      {
+        id: "cue-0",
+        start: 1,
+        end: 2,
+        source: "we use q learning",
+      },
+      {
+        id: "cue-1",
+        start: 2,
+        end: 3,
+        source: "and epsilon greedy in mdp.",
+      },
+    ],
+    { captionKind: "asr" },
+  );
+
+  assert.equal(
+    segments[0].sourceRaw,
+    "we use q learning and epsilon greedy in mdp.",
+  );
+  assert.equal(
+    segments[0].sourceClean,
+    "we use Q-learning and epsilon-greedy in MDP.",
+  );
+  assert.deepEqual(
+    segments[0].cues.map((cue) => cue.sourceRaw),
+    ["we use q learning", "and epsilon greedy in mdp."],
+  );
+  assert.deepEqual(
+    segments[0].cues.map((cue) => cue.sourceClean),
+    ["we use Q-learning", "and epsilon-greedy in MDP."],
+  );
+});
+
+test("keeps manual captions on light source cleaning", () => {
+  assert.equal(
+    core.cleanCaptionSourceText("  Q learning   and epsilon greedy  ", {
+      captionKind: "manual",
+    }),
+    "Q learning and epsilon greedy",
+  );
+});
+
+test("cleans ASR fillers, casing, punctuation, and common technical errors", () => {
+  assert.equal(
+    core.cleanCaptionSourceText(
+      "um you know mark off decision process and cue value",
+      { captionKind: "asr" },
+    ),
+    "Markov decision process and Q value.",
+  );
+  assert.equal(
+    core.cleanCaptionSourceText("uh temporal different signal", {
+      captionKind: "asr",
+    }),
+    "Temporal-difference signal.",
+  );
+});
+
+test("keeps incomplete segment endings attached to the next cue", () => {
+  const segments = core.buildTranslationSegmentsFromCues([
+    { id: "cue-0", start: 1, end: 2, source: "The first part is the." },
+    { id: "cue-1", start: 2, end: 3, source: "Bellman equation." },
+  ]);
+
+  assert.equal(segments.length, 1);
+  assert.deepEqual(segments[0].cueIds, ["cue-0", "cue-1"]);
+});
+
+test("splits long segments by duration and word count limits", () => {
+  assert.deepEqual(
+    core.buildTranslationSegmentsFromCues(
+      [
+        { id: "cue-0", start: 0, end: 2, source: "one two three" },
+        { id: "cue-1", start: 2, end: 4, source: "four five six" },
+        { id: "cue-2", start: 4, end: 6, source: "seven eight nine" },
+      ],
+      { maxWordsPerSegment: 6, maxDurationSeconds: 10 },
+    ).map((segment) => segment.cueIds),
+    [
+      ["cue-0", "cue-1"],
+      ["cue-2"],
+    ],
+  );
+  assert.deepEqual(
+    core.buildTranslationSegmentsFromCues(
+      [
+        { id: "cue-0", start: 0, end: 6, source: "alpha beta" },
+        { id: "cue-1", start: 6, end: 13, source: "gamma delta" },
+      ],
+      { maxDurationSeconds: 12 },
+    ).map((segment) => segment.cueIds),
+    [["cue-0"], ["cue-1"]],
+  );
+});
+
+test("builds segment prompt that asks for cue-level output", () => {
+  const segments = core.buildTranslationSegmentsFromCues([
+    { id: "cue-0", start: 1, end: 1.8, source: "in reinforcement" },
+    { id: "cue-1", start: 1.8, end: 2.6, source: "learning." },
+  ]);
+  const prompt = core.buildSegmentTranslationPrompt({
+    outputSegments: segments,
+    nonOutputContextBefore: [
+      { id: "cue-before", start: 0, end: 1, source: "Today we discuss MDPs." },
+    ],
+    nonOutputContextAfter: [
+      { id: "cue-after", start: 3, end: 4, source: "The reward comes next." },
+    ],
+    videoMemory: {
+      summary: "A reinforcement learning lecture.",
+      glossary: [{ source: "MDP", translation: "MDP" }],
+    },
+    metadata: { title: "RL lecture" },
+    customInstructions: "保留 policy。",
+    userGlossary: [{ source: "policy", target: "policy", locked: true }],
+  });
+
+  assert.match(prompt, /whole segment/);
+  assert.match(prompt, /cue_translations/);
+  assert.match(prompt, /non_output_context_before/);
+  assert.match(prompt, /output_segments/);
+  assert.match(prompt, /non_output_context_after/);
+  assert.match(prompt, /videoMemory/);
+  assert.match(prompt, /segment-0/);
+  assert.match(prompt, /cue-0/);
+  assert.match(prompt, /cue-1/);
+  assert.match(prompt, /A reinforcement learning lecture/);
+  assert.match(prompt, /user_glossary/);
+  assert.match(prompt, /User glossary > video memory glossary/);
+  assert.match(prompt, /保留 policy/);
+});
+
+test("parses user glossary entries with locked priority", () => {
+  assert.deepEqual(
+    core.parseUserGlossary(`
+policy = policy
+regret -> regret
+bandit: bandit（多臂赌博机）
+invalid line
+    `),
+    [
+      { source: "policy", target: "policy", locked: true },
+      { source: "regret", target: "regret", locked: true },
+      { source: "bandit", target: "bandit（多臂赌博机）", locked: true },
+    ],
+  );
+  assert.equal(
+    core.createGlossaryVersion(core.parseUserGlossary("policy = policy")),
+    core.createGlossaryVersion(core.parseUserGlossary(" policy=policy ")),
+  );
+});
+
+test("parses segment translation response into cue translations", () => {
+  const result = core.parseSegmentTranslationResponse(`Here is JSON:
+  {
+    "segments": [
+      {
+        "id": "segment-0",
+        "clean_source": "in reinforcement learning.",
+        "full_translation": "在强化学习中。",
+        "cue_translations": [
+          {"id": "cue-0", "translation": "在强化"},
+          {"id": "cue-1", "translation": "学习中。"}
+        ]
+      }
+    ]
+  }`);
+
+  assert.deepEqual(result, {
+    cueTranslations: {
+      "cue-0": "在强化",
+      "cue-1": "学习中。",
+    },
+    segmentTranslations: {
+      "segment-0": {
+        cleanSource: "in reinforcement learning.",
+        fullTranslation: "在强化学习中。",
+      },
+    },
+  });
+});
+
+test("builds overlapping video memory chunks from cleaned cues", () => {
+  const cues = [
+    { id: "cue-0", start: 0, end: 1, source: "we discuss q learning" },
+    { id: "cue-1", start: 1, end: 2, source: "and mdp." },
+    { id: "cue-2", start: 2, end: 3, source: "the policy changes" },
+    { id: "cue-3", start: 3, end: 4, source: "with reward." },
+    { id: "cue-4", start: 4, end: 5, source: "next topic." },
+  ];
+
+  assert.deepEqual(
+    core.buildVideoMemoryChunks(cues, {
+      captionKind: "asr",
+      chunkSize: 3,
+      overlap: 1,
+    }),
+    [
+      {
+        id: "memory-chunk-0",
+        cues: [
+          {
+            id: "cue-0",
+            start: 0,
+            end: 1,
+            sourceRaw: "we discuss q learning",
+            sourceClean: "we discuss Q-learning",
+          },
+          {
+            id: "cue-1",
+            start: 1,
+            end: 2,
+            sourceRaw: "and mdp.",
+            sourceClean: "and MDP.",
+          },
+          {
+            id: "cue-2",
+            start: 2,
+            end: 3,
+            sourceRaw: "the policy changes",
+            sourceClean: "the policy changes",
+          },
+        ],
+      },
+      {
+        id: "memory-chunk-1",
+        cues: [
+          {
+            id: "cue-2",
+            start: 2,
+            end: 3,
+            sourceRaw: "the policy changes",
+            sourceClean: "the policy changes",
+          },
+          {
+            id: "cue-3",
+            start: 3,
+            end: 4,
+            sourceRaw: "with reward.",
+            sourceClean: "with reward.",
+          },
+          {
+            id: "cue-4",
+            start: 4,
+            end: 5,
+            sourceRaw: "next topic.",
+            sourceClean: "next topic.",
+          },
+        ],
+      },
+    ],
+  );
+});
+
+test("builds and parses video memory analysis prompts", () => {
+  const chunk = core.buildVideoMemoryChunks(
+    [{ id: "cue-0", start: 0, end: 1, source: "q value is updated" }],
+    { captionKind: "asr" },
+  )[0];
+  const prompt = core.buildVideoMemoryPrompt({
+    chunk,
+    metadata: { title: "RL lecture" },
+    captionKind: "asr",
+  });
+  const parsed = core.parseVideoMemoryResponse(`{
+    "summary": "RL update rules.",
+    "domain": "reinforcement learning",
+    "styleGuide": "Use concise subtitle Chinese.",
+    "glossary": [{"source":"Q value","translation":"Q 值"}],
+    "entities": ["Bellman"],
+    "asrCorrections": [{"wrong":"cue value","correct":"Q value"}]
+  }`);
+
+  assert.match(prompt, /VideoMemory map step/);
+  assert.match(prompt, /summary/);
+  assert.match(prompt, /glossary/);
+  assert.match(prompt, /asrCorrections/);
+  assert.match(prompt, /Q value/);
+  assert.deepEqual(parsed, {
+    summary: "RL update rules.",
+    domain: "reinforcement learning",
+    styleGuide: "Use concise subtitle Chinese.",
+    glossary: [{ source: "Q value", translation: "Q 值" }],
+    entities: ["Bellman"],
+    asrCorrections: [{ wrong: "cue value", correct: "Q value" }],
+  });
+});
+
+test("merges video memory map outputs into a compressed memory", () => {
+  assert.deepEqual(
+    core.mergeVideoMemoryItems([
+      {
+        summary: "Introduces bandits.",
+        domain: "reinforcement learning",
+        glossary: [
+          { source: "Q value", translation: "Q 值" },
+          { source: "policy", translation: "策略" },
+        ],
+        entities: ["UCB"],
+        asrCorrections: [{ wrong: "cue value", correct: "Q value" }],
+      },
+      {
+        summary: "Explains regret.",
+        domain: "RL",
+        glossary: [{ source: "Q value", translation: "Q 值" }],
+        entities: ["UCB", "PAC"],
+        asrCorrections: [{ wrong: "empty greedy", correct: "epsilon-greedy" }],
+      },
+    ]),
+    {
+      summary: "Introduces bandits. Explains regret.",
+      domain: "reinforcement learning",
+      styleGuide: "",
+      glossary: [
+        { source: "Q value", translation: "Q 值" },
+        { source: "policy", translation: "策略" },
+      ],
+      entities: ["UCB", "PAC"],
+      asrCorrections: [
+        { wrong: "cue value", correct: "Q value" },
+        { wrong: "empty greedy", correct: "epsilon-greedy" },
+      ],
+    },
+  );
+});
+
+test("builds video memory reduce prompts with channel memory", () => {
+  const prompt = core.buildVideoMemoryReducePrompt({
+    items: [
+      {
+        summary: "Introduces Q value.",
+        glossary: [{ source: "Q value", translation: "Q 值" }],
+      },
+    ],
+    channelMemory: {
+      summary: "Prior lectures use policy in English.",
+      glossary: [{ source: "policy", translation: "policy" }],
+    },
+    metadata: {
+      title: "RL lecture",
+      description: "A lecture about Bellman equations.",
+      playlist: "RL course",
+      chapters: ["Intro", "Bellman"],
+    },
+  });
+
+  assert.match(prompt, /VideoMemory reduce step/);
+  assert.match(prompt, /channelMemory/);
+  assert.match(prompt, /RL course/);
+  assert.match(prompt, /Bellman equations/);
+  assert.match(prompt, /Q value/);
+  assert.match(prompt, /policy/);
+});
+
 test("creates stable cache keys from provider, model, context, and caption", () => {
   const first = core.createCaptionCacheKey({
     provider: "gemini",
@@ -232,6 +670,56 @@ test("creates stable cache keys from provider, model, context, and caption", () 
   });
 
   assert.equal(first, second);
+});
+
+test("creates versioned translation cache keys from clean source and glossary", () => {
+  const base = {
+    provider: "gemini",
+    model: "gemini-2.5-flash",
+    videoId: "abc",
+    sourceLanguage: "en",
+    targetLanguage: "zh-CN",
+    promptVersion: "segment-v2",
+    glossaryVersion: "g1",
+    segmentId: "segment-1",
+    sourceClean: "Q value is updated.",
+  };
+
+  assert.equal(
+    core.createCaptionCacheKey(base),
+    core.createCaptionCacheKey({ ...base, currentText: "ignored" }),
+  );
+  assert.notEqual(
+    core.createCaptionCacheKey(base),
+    core.createCaptionCacheKey({ ...base, glossaryVersion: "g2" }),
+  );
+  assert.notEqual(
+    core.createCaptionCacheKey(base),
+    core.createCaptionCacheKey({ ...base, sourceClean: "Q value changes." }),
+  );
+});
+
+test("applies locked glossary terms to cue translations conservatively", () => {
+  assert.deepEqual(
+    core.applyGlossaryConsistency({
+      cueTranslations: {
+        "cue-0": "这个政策会更新。",
+        "cue-1": "遗憾值会下降。",
+      },
+      cueSources: {
+        "cue-0": "the policy is updated",
+        "cue-1": "the regret decreases",
+      },
+      glossary: [
+        { source: "policy", target: "policy", locked: true },
+        { source: "regret", target: "regret", locked: true },
+      ],
+    }),
+    {
+      "cue-0": "这个政策会更新。 policy",
+      "cue-1": "遗憾值会下降。 regret",
+    },
+  );
 });
 
 test("builds bilingual caption lines without duplicating empty translations", () => {
@@ -887,4 +1375,140 @@ test("wires video summary integration points into background and content script"
   assert.match(script, /seekToSummaryChapter/);
   assert.match(script, /YTCT_SUMMARIZE_VIDEO/);
   assert.match(css, /\.ytct-summary-panel/);
+});
+
+test("background batch translation routes through semantic segments", () => {
+  const script = fs.readFileSync(
+    path.join(projectRoot, "src", "background.js"),
+    "utf8",
+  );
+
+  assert.match(script, /core\.buildTranslationSegmentsFromCues/);
+  assert.match(script, /core\.buildSegmentTranslationPrompt/);
+  assert.match(script, /core\.parseSegmentTranslationResponse/);
+  assert.match(script, /segmentTranslations/);
+  assert.match(script, /captionKind:\s*payload\.captionKind/);
+});
+
+test("content script passes caption kind into batch translation", () => {
+  const script = fs.readFileSync(
+    path.join(projectRoot, "src", "content_script.js"),
+    "utf8",
+  );
+
+  assert.match(script, /captionKind/);
+  assert.match(script, /track\?\.kind === "asr"/);
+  assert.match(script, /captionKind:\s*state\.captionKind/);
+});
+
+test("content script supports source display and sync strategies", () => {
+  const script = fs.readFileSync(
+    path.join(projectRoot, "src", "content_script.js"),
+    "utf8",
+  );
+
+  assert.match(script, /segmentTranslations/);
+  assert.match(script, /function displaySourceForCue/);
+  assert.match(script, /sourceDisplayMode/);
+  assert.match(script, /syncStrategy/);
+  assert.match(script, /完整句/);
+});
+
+test("background exposes video memory analysis pipeline", () => {
+  const script = fs.readFileSync(
+    path.join(projectRoot, "src", "background.js"),
+    "utf8",
+  );
+
+  assert.match(script, /YTCT_ANALYZE_VIDEO_MEMORY/);
+  assert.match(script, /core\.buildVideoMemoryChunks/);
+  assert.match(script, /core\.buildVideoMemoryPrompt/);
+  assert.match(script, /core\.buildVideoMemoryReducePrompt/);
+  assert.match(script, /core\.parseVideoMemoryResponse/);
+  assert.match(script, /core\.mergeVideoMemoryItems/);
+});
+
+test("background persists video memory and updates channel memory", () => {
+  const script = fs.readFileSync(
+    path.join(projectRoot, "src", "background.js"),
+    "utf8",
+  );
+
+  assert.match(script, /VIDEO_MEMORY_CACHE_KEY/);
+  assert.match(script, /function videoMemoryCacheKey/);
+  assert.match(script, /async function readVideoMemoryCache/);
+  assert.match(script, /async function writeVideoMemoryCache/);
+  assert.match(script, /channelMemories/);
+});
+
+test("background uses user glossary, consistency pass, and versioned cache keys", () => {
+  const script = fs.readFileSync(
+    path.join(projectRoot, "src", "background.js"),
+    "utf8",
+  );
+
+  assert.match(script, /core\.parseUserGlossary\(settings\.userGlossary\)/);
+  assert.match(script, /core\.createGlossaryVersion/);
+  assert.match(script, /promptVersion/);
+  assert.match(script, /segmentId/);
+  assert.match(script, /sourceClean/);
+  assert.match(script, /core\.applyGlossaryConsistency/);
+});
+
+test("content script requests video memory and sends it with batches", () => {
+  const script = fs.readFileSync(
+    path.join(projectRoot, "src", "content_script.js"),
+    "utf8",
+  );
+
+  assert.match(script, /videoMemory/);
+  assert.match(script, /function requestVideoMemoryAnalysis/);
+  assert.match(script, /YTCT_ANALYZE_VIDEO_MEMORY/);
+  assert.match(script, /videoMemory:\s*state\.videoMemory/);
+});
+
+test("content metadata includes description, playlist, and chapters", () => {
+  const script = fs.readFileSync(
+    path.join(projectRoot, "src", "content_script.js"),
+    "utf8",
+  );
+
+  assert.match(script, /description/);
+  assert.match(script, /playlist/);
+  assert.match(script, /chapters/);
+  assert.match(script, /expandMetadataDescription/);
+});
+
+test("options page exposes user glossary settings", () => {
+  const html = fs.readFileSync(
+    path.join(projectRoot, "src", "options.html"),
+    "utf8",
+  );
+  const script = fs.readFileSync(
+    path.join(projectRoot, "src", "options.js"),
+    "utf8",
+  );
+
+  assert.match(html, /id="userGlossary"/);
+  assert.match(script, /userGlossary:\s*document\.querySelector\("#userGlossary"\)/);
+  assert.match(script, /form\.userGlossary\.value = settings\.userGlossary/);
+  assert.match(script, /userGlossary:\s*form\.userGlossary\.value/);
+});
+
+test("options page exposes source display and sync strategy settings", () => {
+  const html = fs.readFileSync(
+    path.join(projectRoot, "src", "options.html"),
+    "utf8",
+  );
+  const script = fs.readFileSync(
+    path.join(projectRoot, "src", "options.js"),
+    "utf8",
+  );
+
+  assert.match(html, /id="sourceDisplayMode"/);
+  assert.match(html, /id="syncStrategy"/);
+  assert.match(script, /sourceDisplayMode:\s*document\.querySelector\("#sourceDisplayMode"\)/);
+  assert.match(script, /syncStrategy:\s*document\.querySelector\("#syncStrategy"\)/);
+  assert.match(script, /sourceDisplayMode:\s*form\.sourceDisplayMode\.value/);
+  assert.match(script, /syncStrategy:\s*form\.syncStrategy\.value/);
 });

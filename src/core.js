@@ -11,11 +11,15 @@
     openrouterModel: "google/gemini-2.5-flash-lite",
     contextItems: 8,
     customInstructions: "",
+    userGlossary: "",
+    sourceDisplayMode: "raw",
+    syncStrategy: "cue",
     overlayOpacityPercent: 78,
     overlayFontScalePercent: 100,
     overlayXPercent: 50,
     overlayYPercent: 86,
   });
+  const TRANSLATION_PROMPT_VERSION = "segment-v2";
   const COURSE_TRANSLATION_GUIDANCE = Object.freeze([
     "Assume this is an ML/AI/RL course lecture unless metadata clearly says otherwise.",
     "Translate for a Chinese learner taking technical notes: concise, natural, and synchronized.",
@@ -111,6 +115,13 @@
         typeof value.customInstructions === "string"
           ? value.customInstructions.trim()
           : "",
+      userGlossary:
+        typeof value.userGlossary === "string" ? value.userGlossary.trim() : "",
+      sourceDisplayMode: value.sourceDisplayMode === "clean" ? "clean" : "raw",
+      syncStrategy:
+        value.syncStrategy === "segment" || value.syncStrategy === "hybrid"
+          ? value.syncStrategy
+          : "cue",
       overlayOpacityPercent: clampInteger(
         value.overlayOpacityPercent,
         0,
@@ -164,6 +175,55 @@
 
   function safeLine(value) {
     return normalizeCaptionText(value).replace(/\|/g, "/");
+  }
+
+  function stableHash(value) {
+    const text = String(value || "");
+    let hash = 2166136261;
+    for (let index = 0; index < text.length; index += 1) {
+      hash ^= text.charCodeAt(index);
+      hash = Math.imul(hash, 16777619);
+    }
+    return (hash >>> 0).toString(16).padStart(8, "0");
+  }
+
+  function parseUserGlossary(value) {
+    return String(value || "")
+      .split(/\r?\n/)
+      .map((line) => normalizeCaptionText(line))
+      .filter((line) => line && !line.startsWith("#"))
+      .map((line) => {
+        const match = line.match(/^(.+?)(?:=>|->|=|:)(.+)$/);
+        if (!match) {
+          return null;
+        }
+        const source = normalizeCaptionText(match[1]);
+        const target = normalizeCaptionText(match[2]);
+        if (!source || !target) {
+          return null;
+        }
+        return { source, target, locked: true };
+      })
+      .filter(Boolean);
+  }
+
+  function normalizeGlossaryForPrompt(value) {
+    return (Array.isArray(value) ? value : parseUserGlossary(value))
+      .map((item) => ({
+        source: normalizeCaptionText(item?.source || item?.term || ""),
+        target: normalizeCaptionText(
+          item?.target || item?.translation || item?.value || "",
+        ),
+        locked: item?.locked !== false,
+      }))
+      .filter((item) => item.source && item.target);
+  }
+
+  function createGlossaryVersion(value) {
+    const entries = normalizeGlossaryForPrompt(value)
+      .map((item) => `${item.source.toLowerCase()}=${item.target}:${item.locked}`)
+      .sort();
+    return stableHash(entries.join("\n"));
   }
 
   function removeRepeatedAdjacentWords(text) {
@@ -879,6 +939,482 @@
     );
   }
 
+  function hasSentenceEnding(text) {
+    return /[.!?。！？]$/.test(normalizeCaptionText(text));
+  }
+
+  function hasIncompleteSegmentEnding(text) {
+    return /\b(?:the|a|an|to|of|for|with|and|or|but|because|that|which|is|are|was|were)\.?$/i
+      .test(normalizeCaptionText(text));
+  }
+
+  function countWords(text) {
+    return normalizeCaptionText(text).split(/\s+/).filter(Boolean).length;
+  }
+
+  function cleanCaptionSourceText(value, options = {}) {
+    let text = normalizeCaptionText(value);
+    if (options.captionKind !== "asr") {
+      return text;
+    }
+
+    text = text
+      .replace(/\b(?:um|uh|you know)\b[,\s]*/gi, " ")
+      .replace(/\s+/g, " ")
+      .trim();
+
+    [
+      [/\bmark\s+off\s+decision\s+process\b/gi, "Markov decision process"],
+      [/\btemporal\s+different\s+signal\b/gi, "Temporal-difference signal"],
+      [/\bcue\s+value\b/gi, "Q value"],
+      [/\bq\s+learning\b/gi, "Q-learning"],
+      [/\bepsilon\s+greedy\b/gi, "epsilon-greedy"],
+      [/\bq\s+value\b/gi, "Q value"],
+      [/\bmdp\b/gi, "MDP"],
+      [/\bpac\b/gi, "PAC"],
+      [/\bucb\b/gi, "UCB"],
+      [/\bsarsa\b/gi, "SARSA"],
+      [/\bdqn\b/gi, "DQN"],
+    ].forEach(([pattern, replacement]) => {
+      text = text.replace(pattern, replacement);
+    });
+
+    text = normalizeCaptionText(text);
+    if (options.restoreFinalPunctuation !== false && text && !hasSentenceEnding(text)) {
+      text = `${text}.`;
+    }
+    return text;
+  }
+
+  function normalizeTranslationCue(cue, options = {}) {
+    const id = normalizeCaptionText(cue?.id);
+    const start = roundSeconds(cue?.start);
+    const end = roundSeconds(cue?.end);
+    const sourceRaw = normalizeCaptionText(
+      cue?.sourceRaw || cue?.source || cue?.text || "",
+    );
+    if (!id || !sourceRaw || !Number.isFinite(start) || !Number.isFinite(end)) {
+      return null;
+    }
+    return {
+      id,
+      start,
+      end,
+      sourceRaw,
+      sourceClean:
+        typeof cue?.sourceClean === "string"
+          ? normalizeCaptionText(cue.sourceClean)
+          : cleanCaptionSourceText(sourceRaw, {
+              captionKind: cue?.captionKind || options.captionKind,
+              restoreFinalPunctuation: false,
+            }),
+    };
+  }
+
+  function buildSegmentFromCues(cues, index) {
+    const normalizedCues = cues.map((cue) => ({
+      id: cue.id,
+      start: cue.start,
+      end: cue.end,
+      sourceRaw: cue.sourceRaw,
+      sourceClean: cue.sourceClean,
+    }));
+    return {
+      id: `segment-${index}`,
+      start: normalizedCues[0].start,
+      end: normalizedCues[normalizedCues.length - 1].end,
+      sourceRaw: normalizeCaptionText(
+        normalizedCues.map((cue) => cue.sourceRaw).join(" "),
+      ),
+      sourceClean: normalizeCaptionText(
+        normalizedCues.map((cue) => cue.sourceClean).join(" "),
+      ),
+      cueIds: normalizedCues.map((cue) => cue.id),
+      cues: normalizedCues,
+    };
+  }
+
+  function buildTranslationSegmentsFromCues(cues, options = {}) {
+    const maxCuesPerSegment = clampInteger(options.maxCuesPerSegment, 1, 10, 5);
+    const maxWordsPerSegment = clampInteger(options.maxWordsPerSegment, 4, 80, 45);
+    const maxSegmentChars = clampInteger(options.maxSegmentChars, 80, 600, 220);
+    const maxDurationSeconds = Number.isFinite(Number(options.maxDurationSeconds))
+      ? Number(options.maxDurationSeconds)
+      : 12;
+    const maxGapSeconds = Number.isFinite(Number(options.maxGapSeconds))
+      ? Number(options.maxGapSeconds)
+      : 1.2;
+    const normalizedCues = (Array.isArray(cues) ? cues : [])
+      .map((cue) => normalizeTranslationCue(cue, options))
+      .filter(Boolean);
+    const segments = [];
+    let current = [];
+
+    function flush() {
+      if (current.length === 0) {
+        return;
+      }
+      segments.push(buildSegmentFromCues(current, segments.length));
+      current = [];
+    }
+
+    for (const cue of normalizedCues) {
+      const previous = current[current.length - 1];
+      if (previous) {
+        const nextText = current
+          .map((item) => item.sourceClean)
+          .concat(cue.sourceClean)
+          .join(" ");
+        const nextDuration = cue.end - current[0].start;
+        if (
+          countWords(nextText) > maxWordsPerSegment ||
+          nextDuration > maxDurationSeconds
+        ) {
+          flush();
+        }
+      }
+      if (
+        current.length > 0 &&
+        Number.isFinite(maxGapSeconds) &&
+        cue.start - current[current.length - 1].end > maxGapSeconds &&
+        countWords(current.map((item) => item.sourceClean).join(" ")) > 4
+      ) {
+        flush();
+      }
+
+      current.push(cue);
+      const currentText = current.map((item) => item.sourceClean).join(" ");
+      if (
+        (hasSentenceEnding(cue.sourceClean) &&
+          !hasIncompleteSegmentEnding(currentText)) ||
+        current.length >= maxCuesPerSegment ||
+        countWords(currentText) >= maxWordsPerSegment ||
+        normalizeCaptionText(currentText).length >= maxSegmentChars
+      ) {
+        flush();
+      }
+    }
+
+    flush();
+    return segments;
+  }
+
+  function compactCueForPrompt(cue) {
+    const normalized = normalizeTranslationCue(cue);
+    if (!normalized) {
+      return null;
+    }
+    return normalized;
+  }
+
+  function buildSegmentTranslationPrompt(options) {
+    const {
+      outputSegments = [],
+      nonOutputContextBefore = [],
+      nonOutputContextAfter = [],
+      videoMemory = {},
+      metadata = {},
+      customInstructions = "",
+      userGlossary = [],
+    } = options || {};
+    const segments = (Array.isArray(outputSegments) ? outputSegments : [])
+      .filter((segment) => segment && normalizeCaptionText(segment.id));
+    const before = (Array.isArray(nonOutputContextBefore)
+      ? nonOutputContextBefore
+      : [])
+      .map(compactCueForPrompt)
+      .filter(Boolean);
+    const after = (Array.isArray(nonOutputContextAfter)
+      ? nonOutputContextAfter
+      : [])
+      .map(compactCueForPrompt)
+      .filter(Boolean);
+    const compactMemory =
+      videoMemory && typeof videoMemory === "object" ? videoMemory : {};
+    const lockedUserGlossary = normalizeGlossaryForPrompt(userGlossary);
+    const promptInput = {
+      videoMemory: compactMemory,
+      user_glossary: lockedUserGlossary,
+      non_output_context_before: before,
+      output_segments: segments.map((segment) => ({
+        id: normalizeCaptionText(segment.id),
+        start: roundSeconds(segment.start),
+        end: roundSeconds(segment.end),
+        sourceRaw: normalizeCaptionText(segment.sourceRaw),
+        sourceClean: normalizeCaptionText(segment.sourceClean || segment.sourceRaw),
+        cues: (Array.isArray(segment.cues) ? segment.cues : [])
+          .map(compactCueForPrompt)
+          .filter(Boolean),
+      })),
+      non_output_context_after: after,
+    };
+    const lines = [
+      "Task: translate YouTube subtitles into Simplified Chinese by understanding each whole segment, then returning cue-level output.",
+      "Translate each output segment as one complete semantic unit.",
+      "Do not change cue ids or timestamps. Only output translations for output_segments.",
+      "Use clean_source for understanding; keep sourceRaw/sourceClean distinctions intact.",
+      "Keep cue_translations concise enough for the original cue timing.",
+      "Glossary priority: User glossary > video memory glossary > model default translation.",
+      "",
+      "Default course translation guidance:",
+      ...COURSE_TRANSLATION_GUIDANCE.map((line) => `- ${line}`),
+      "",
+      'Return only JSON in this exact shape: {"segments":[{"id":"segment-0","clean_source":"...","full_translation":"...","cue_translations":[{"id":"cue-0","translation":"..."}]}]}',
+      "",
+      "Video metadata:",
+      `- Title: ${safeLine(metadata.title) || "Unknown"}`,
+      `- Channel: ${safeLine(metadata.channel) || "Unknown"}`,
+      "",
+      "Input JSON:",
+      JSON.stringify(promptInput, null, 2),
+    ];
+
+    if (normalizeCaptionText(customInstructions)) {
+      lines.push("", "User translation preferences:", normalizeCaptionText(customInstructions));
+    }
+
+    return lines.join("\n");
+  }
+
+  function parseSegmentTranslationResponse(text) {
+    const stripped = stripFences(text);
+    const candidates = [stripped];
+    const objectMatch = stripped.match(/\{[\s\S]*"segments"\s*:[\s\S]*\}/);
+    if (objectMatch) {
+      candidates.push(objectMatch[0]);
+    }
+
+    for (const candidate of candidates) {
+      try {
+        const parsed = JSON.parse(candidate);
+        const segments = Array.isArray(parsed?.segments) ? parsed.segments : [];
+        const cueTranslations = {};
+        const segmentTranslations = {};
+
+        segments.forEach((segment) => {
+          const segmentId = normalizeCaptionText(segment?.id);
+          if (segmentId) {
+            segmentTranslations[segmentId] = {
+              cleanSource: normalizeCaptionText(
+                segment.clean_source || segment.cleanSource || "",
+              ),
+              fullTranslation: cleanTranslationText(
+                segment.full_translation || segment.fullTranslation || "",
+              ),
+            };
+          }
+          const cueItems = Array.isArray(segment?.cue_translations)
+            ? segment.cue_translations
+            : Array.isArray(segment?.cueTranslations)
+              ? segment.cueTranslations
+              : [];
+          cueItems.forEach((item) => {
+            const id = normalizeCaptionText(item?.id);
+            const translation = cleanTranslationText(item?.translation);
+            if (id && translation) {
+              cueTranslations[id] = translation;
+            }
+          });
+        });
+
+        return { cueTranslations, segmentTranslations };
+      } catch (_error) {
+        // Try the next candidate.
+      }
+    }
+
+    return { cueTranslations: {}, segmentTranslations: {} };
+  }
+
+  function buildVideoMemoryChunks(cues, options = {}) {
+    const chunkSize = clampInteger(options.chunkSize, 1, 50, 20);
+    const overlap = clampInteger(options.overlap, 0, chunkSize - 1, 2);
+    const maxChunks = clampInteger(options.maxChunks, 1, 50, 50);
+    const step = Math.max(1, chunkSize - overlap);
+    const normalizedCues = (Array.isArray(cues) ? cues : [])
+      .map((cue) => normalizeTranslationCue(cue, options))
+      .filter(Boolean);
+    const chunks = [];
+
+    for (
+      let start = 0;
+      start < normalizedCues.length && chunks.length < maxChunks;
+      start += step
+    ) {
+      const end = Math.min(normalizedCues.length, start + chunkSize);
+      chunks.push({
+        id: `memory-chunk-${chunks.length}`,
+        cues: normalizedCues.slice(start, end),
+      });
+      if (end >= normalizedCues.length) {
+        break;
+      }
+    }
+
+    return chunks;
+  }
+
+  function buildVideoMemoryPrompt(options) {
+    const {
+      chunk = {},
+      metadata = {},
+      captionKind = "unknown",
+    } = options || {};
+    const input = {
+      chunkId: normalizeCaptionText(chunk.id),
+      captionKind: normalizeCaptionText(captionKind) || "unknown",
+      cues: (Array.isArray(chunk.cues) ? chunk.cues : [])
+        .map((cue) => normalizeTranslationCue(cue, { captionKind }))
+        .filter(Boolean),
+    };
+    return [
+      "VideoMemory map step: analyze this subtitle chunk for later translation consistency.",
+      "Extract only stable facts that help translate future subtitle segments.",
+      'Return only JSON in this exact shape: {"summary":"...","domain":"...","styleGuide":"...","glossary":[{"source":"...","translation":"..."}],"entities":["..."],"asrCorrections":[{"wrong":"...","correct":"..."}]}',
+      "",
+      "Video metadata:",
+      `- Title: ${safeLine(metadata.title) || "Unknown"}`,
+      `- Channel: ${safeLine(metadata.channel) || "Unknown"}`,
+      "",
+      "Chunk JSON:",
+      JSON.stringify(input, null, 2),
+    ].join("\n");
+  }
+
+  function buildVideoMemoryReducePrompt(options) {
+    const {
+      items = [],
+      channelMemory = {},
+      metadata = {},
+    } = options || {};
+    const input = {
+      metadata: {
+        title: normalizeCaptionText(metadata.title),
+        channel: normalizeCaptionText(metadata.channel),
+        description: normalizeCaptionText(metadata.description),
+        playlist: normalizeCaptionText(metadata.playlist),
+        chapters: (Array.isArray(metadata.chapters) ? metadata.chapters : [])
+          .map(normalizeCaptionText)
+          .filter(Boolean),
+      },
+      channelMemory:
+        channelMemory && typeof channelMemory === "object" ? channelMemory : {},
+      mapItems: (Array.isArray(items) ? items : []).map((item) =>
+        mergeVideoMemoryItems([item]),
+      ),
+    };
+    return [
+      "VideoMemory reduce step: merge chunk memories into one compact memory card for subtitle translation.",
+      "Prefer user/course/channel-stable terminology. Keep only facts useful for future segment translation.",
+      'Return only JSON in this exact shape: {"summary":"...","domain":"...","styleGuide":"...","glossary":[{"source":"...","translation":"..."}],"entities":["..."],"asrCorrections":[{"wrong":"...","correct":"..."}]}',
+      "",
+      "Reduce input JSON:",
+      JSON.stringify(input, null, 2),
+    ].join("\n");
+  }
+
+  function normalizeGlossaryItems(value) {
+    return (Array.isArray(value) ? value : [])
+      .map((item) => ({
+        source: normalizeCaptionText(item?.source || item?.term || ""),
+        translation: normalizeCaptionText(item?.translation || item?.target || ""),
+      }))
+      .filter((item) => item.source && item.translation);
+  }
+
+  function normalizeAsrCorrections(value) {
+    return (Array.isArray(value) ? value : [])
+      .map((item) => ({
+        wrong: normalizeCaptionText(item?.wrong || item?.source || ""),
+        correct: normalizeCaptionText(item?.correct || item?.target || ""),
+      }))
+      .filter((item) => item.wrong && item.correct);
+  }
+
+  function parseVideoMemoryResponse(text) {
+    const stripped = stripFences(text);
+    const candidates = [stripped];
+    const objectMatch = stripped.match(/\{[\s\S]*"summary"\s*:[\s\S]*\}/);
+    if (objectMatch) {
+      candidates.push(objectMatch[0]);
+    }
+
+    for (const candidate of candidates) {
+      try {
+        const parsed = JSON.parse(candidate);
+        return {
+          summary: normalizeCaptionText(parsed?.summary),
+          domain: normalizeCaptionText(parsed?.domain),
+          styleGuide: normalizeCaptionText(parsed?.styleGuide || parsed?.style_guide),
+          glossary: normalizeGlossaryItems(parsed?.glossary),
+          entities: (Array.isArray(parsed?.entities) ? parsed.entities : [])
+            .map(normalizeCaptionText)
+            .filter(Boolean),
+          asrCorrections: normalizeAsrCorrections(
+            parsed?.asrCorrections || parsed?.asr_corrections,
+          ),
+        };
+      } catch (_error) {
+        // Try the next candidate.
+      }
+    }
+
+    return mergeVideoMemoryItems([]);
+  }
+
+  function uniqueBy(items, keyFn, limit) {
+    const result = [];
+    const seen = new Set();
+    for (const item of items) {
+      const key = keyFn(item);
+      if (!key || seen.has(key)) {
+        continue;
+      }
+      seen.add(key);
+      result.push(item);
+      if (result.length >= limit) {
+        break;
+      }
+    }
+    return result;
+  }
+
+  function mergeVideoMemoryItems(items, options = {}) {
+    const summaryLimit = clampInteger(options.summaryLimit, 80, 1200, 420);
+    const itemLimit = clampInteger(options.itemLimit, 1, 80, 24);
+    const values = Array.isArray(items) ? items : [];
+    return {
+      summary: normalizeCaptionText(
+        values
+          .map((item) => item?.summary)
+          .filter(Boolean)
+          .join(" "),
+      ).slice(0, summaryLimit),
+      domain: normalizeCaptionText(values.find((item) => item?.domain)?.domain),
+      styleGuide: normalizeCaptionText(
+        values.find((item) => item?.styleGuide)?.styleGuide,
+      ),
+      glossary: uniqueBy(
+        values.flatMap((item) => normalizeGlossaryItems(item?.glossary)),
+        (item) => item.source.toLowerCase(),
+        itemLimit,
+      ),
+      entities: uniqueBy(
+        values
+          .flatMap((item) => (Array.isArray(item?.entities) ? item.entities : []))
+          .map(normalizeCaptionText)
+          .filter(Boolean),
+        (item) => item.toLowerCase(),
+        itemLimit,
+      ),
+      asrCorrections: uniqueBy(
+        values.flatMap((item) => normalizeAsrCorrections(item?.asrCorrections)),
+        (item) => item.wrong.toLowerCase(),
+        itemLimit,
+      ),
+    };
+  }
+
   function buildBatchTranslationPrompt(options) {
     const {
       cues = [],
@@ -1392,6 +1928,7 @@
       context = [],
       metadata = {},
       customInstructions = "",
+      userGlossary = [],
       maxContextItems = DEFAULT_SETTINGS.contextItems,
     } = options || {};
 
@@ -1400,6 +1937,7 @@
     const boundedContext = context
       .filter((item) => item && normalizeCaptionText(item.source))
       .slice(-contextLimit);
+    const lockedUserGlossary = normalizeGlossaryForPrompt(userGlossary);
 
     const lines = [
       "Task: translate the current YouTube caption into Simplified Chinese.",
@@ -1415,6 +1953,14 @@
       `- Title: ${safeLine(metadata.title) || "Unknown"}`,
       `- Channel: ${safeLine(metadata.channel) || "Unknown"}`,
       `- URL: ${safeLine(metadata.url) || "Unknown"}`,
+      "",
+      "Glossary priority:",
+      "- User glossary > video memory glossary > model default translation.",
+      "",
+      "User glossary:",
+      lockedUserGlossary.length
+        ? JSON.stringify(lockedUserGlossary)
+        : "[]",
       "",
       "Previous captions:",
     ];
@@ -1500,14 +2046,67 @@
       .join("||");
   }
 
-  function createCaptionCacheKey({ provider, model, videoId, currentText, context }) {
+  function createSourceCleanHash(value) {
+    return stableHash(normalizeCaptionText(value).toLowerCase());
+  }
+
+  function createCaptionCacheKey(options = {}) {
+    const {
+      provider,
+      model,
+      videoId,
+      currentText,
+      context,
+      sourceLanguage = "",
+      targetLanguage = "",
+      promptVersion = "",
+      glossaryVersion = "",
+      segmentId = "",
+      sourceClean = "",
+      sourceCleanHash = "",
+    } = options;
+    const normalizedSourceClean = normalizeCaptionText(sourceClean);
+    const effectiveSourceHash =
+      sourceCleanHash ||
+      (normalizedSourceClean
+        ? createSourceCleanHash(normalizedSourceClean)
+        : normalizeCaptionText(currentText).toLowerCase());
     return [
       provider || "",
       model || "",
       videoId || "",
-      normalizeCaptionText(currentText).toLowerCase(),
+      sourceLanguage || "",
+      targetLanguage || "",
+      promptVersion || "",
+      glossaryVersion || "",
+      segmentId || "",
+      effectiveSourceHash,
       stableContextString(context),
     ].join("::");
+  }
+
+  function applyGlossaryConsistency(options = {}) {
+    const cueTranslations = options.cueTranslations || {};
+    const cueSources = options.cueSources || {};
+    const glossary = normalizeGlossaryForPrompt(options.glossary || [])
+      .filter((item) => item.locked);
+    return Object.entries(cueTranslations).reduce((result, [id, translation]) => {
+      let nextTranslation = cleanTranslationText(translation);
+      const source = normalizeCaptionText(cueSources[id]).toLowerCase();
+      for (const item of glossary) {
+        if (!source.includes(item.source.toLowerCase())) {
+          continue;
+        }
+        if (nextTranslation.toLowerCase().includes(item.target.toLowerCase())) {
+          continue;
+        }
+        nextTranslation = `${nextTranslation} ${item.target}`.trim();
+      }
+      if (id && nextTranslation) {
+        result[id] = nextTranslation;
+      }
+      return result;
+    }, {});
   }
 
   function getYouTubeVideoId(url) {
@@ -1623,7 +2222,12 @@
   const api = {
     DEFAULT_SETTINGS,
     COURSE_TRANSLATION_GUIDANCE,
+    TRANSLATION_PROMPT_VERSION,
     normalizeCaptionText,
+    parseUserGlossary,
+    createGlossaryVersion,
+    createSourceCleanHash,
+    applyGlossaryConsistency,
     extractVisibleCaptionText,
     buildBilingualCaption,
     extractCaptionTracksFromScripts,
@@ -1638,6 +2242,15 @@
     parseTranscriptDomRows,
     findCueAtTime,
     shouldRetryTranscriptDomTimeline,
+    cleanCaptionSourceText,
+    buildTranslationSegmentsFromCues,
+    buildSegmentTranslationPrompt,
+    parseSegmentTranslationResponse,
+    buildVideoMemoryChunks,
+    buildVideoMemoryPrompt,
+    buildVideoMemoryReducePrompt,
+    parseVideoMemoryResponse,
+    mergeVideoMemoryItems,
     normalizeSettings,
     getApiKeyForProvider,
     getModelForProvider,

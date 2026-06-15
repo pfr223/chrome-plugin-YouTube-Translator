@@ -14,7 +14,12 @@
     cache: new Map(),
     videoId: "",
     timeline: [],
+    segments: [],
+    segmentTranslations: {},
     timelineMode: "loading",
+    captionKind: "unknown",
+    videoMemory: null,
+    videoMemoryInFlight: false,
     timelineTimer: 0,
     timelineLoadToken: 0,
     batchInFlight: false,
@@ -45,6 +50,7 @@
   const MESSAGE_TIMEOUT_MS = 22000;
   const BATCH_MESSAGE_TIMEOUT_MS = 35000;
   const SUMMARY_MESSAGE_TIMEOUT_MS = 65000;
+  const VIDEO_MEMORY_MESSAGE_TIMEOUT_MS = 90000;
   const TIMELINE_RENDER_INTERVAL_MS = 180;
   const TIMELINE_BATCH_SIZE = 10;
   const TIMELINE_PREFETCH_CUES = 28;
@@ -649,6 +655,35 @@
     return core.extractVisibleCaptionText(segments);
   }
 
+  function expandMetadataDescription() {
+    return (
+      document.querySelector("#description-inline-expander")?.textContent ||
+      document.querySelector("ytd-text-inline-expander")?.textContent ||
+      document.querySelector("#description")?.textContent ||
+      ""
+    );
+  }
+
+  function readPlaylistTitle() {
+    return (
+      document.querySelector("ytd-playlist-panel-renderer #title")?.textContent ||
+      document.querySelector("ytd-watch-metadata ytd-playlist-byline-renderer")
+        ?.textContent ||
+      ""
+    );
+  }
+
+  function readChapterTitles() {
+    return Array.from(
+      document.querySelectorAll(
+        "ytd-macro-markers-list-item-renderer #details h4, ytd-chapter-renderer #title",
+      ),
+    )
+      .map((element) => core.normalizeCaptionText(element.textContent || ""))
+      .filter(Boolean)
+      .slice(0, 24);
+  }
+
   function readMetadata() {
     const title =
       document.querySelector("h1.ytd-watch-metadata yt-formatted-string")
@@ -664,6 +699,9 @@
     return {
       title: core.normalizeCaptionText(title),
       channel: core.normalizeCaptionText(channel),
+      description: core.normalizeCaptionText(expandMetadataDescription()),
+      playlist: core.normalizeCaptionText(readPlaylistTitle()),
+      chapters: readChapterTitles(),
       url: location.href,
     };
   }
@@ -1068,7 +1106,12 @@
 
     const loadToken = ++state.timelineLoadToken;
     state.timelineMode = "loading";
+    state.captionKind = "unknown";
+    state.videoMemory = null;
+    state.videoMemoryInFlight = false;
     state.timeline = [];
+    state.segments = [];
+    state.segmentTranslations = {};
     updateOverlayDiagnostics({ timelineError: "" });
     renderSummaryPanel();
     window.clearInterval(state.timelineTimer);
@@ -1124,11 +1167,20 @@
         return;
       }
 
+      state.captionKind = track?.kind === "asr" ? "asr" : track ? "manual" : "unknown";
       state.timeline = timeline;
+      state.segments = core.buildTranslationSegmentsFromCues(timeline, {
+        captionKind: state.captionKind,
+      });
       state.timelineMode = "track";
       state.lastText = "";
-      updateOverlayDiagnostics({ timelineError: "", timelineFormat: format });
+      updateOverlayDiagnostics({
+        timelineError: "",
+        timelineFormat: format,
+        captionKind: state.captionKind,
+      });
       startTimelineRenderer();
+      requestVideoMemoryAnalysis();
       prefetchTimelineTranslations({ force: true });
       if (state.summaryStatus === "error" && !state.summaryResult) {
         state.summaryStatus = "idle";
@@ -1183,10 +1235,11 @@
       return;
     }
 
+    const sourceText = displaySourceForCue(cue);
     if (cue.translation) {
-      renderOverlay(cue.translation, "ready", cue.source);
+      renderOverlay(translationForCue(cue), "ready", sourceText);
     } else {
-      renderOverlay("", "ready", cue.source);
+      renderOverlay("", "ready", sourceText);
     }
 
     prefetchTimelineTranslations();
@@ -1211,6 +1264,127 @@
       .slice(currentIndex, searchEnd)
       .filter((cue) => cue.status === "pending" && cue.source)
       .slice(0, TIMELINE_BATCH_SIZE);
+  }
+
+  function timelineCuePayload(cue) {
+    return {
+      id: cue.id,
+      start: cue.start,
+      end: cue.end,
+      source: cue.source,
+    };
+  }
+
+  function batchContextForTimeline(batch, contextSize = 4) {
+    if (!Array.isArray(batch) || batch.length === 0) {
+      return {
+        nonOutputContextBefore: [],
+        nonOutputContextAfter: [],
+      };
+    }
+    const firstIndex = state.timeline.findIndex((cue) => cue.id === batch[0].id);
+    const lastIndex = state.timeline.findIndex(
+      (cue) => cue.id === batch[batch.length - 1].id,
+    );
+    if (firstIndex < 0 || lastIndex < 0) {
+      return {
+        nonOutputContextBefore: [],
+        nonOutputContextAfter: [],
+      };
+    }
+
+    return {
+      nonOutputContextBefore: state.timeline
+        .slice(Math.max(0, firstIndex - contextSize), firstIndex)
+        .map(timelineCuePayload),
+      nonOutputContextAfter: state.timeline
+        .slice(lastIndex + 1, lastIndex + 1 + contextSize)
+        .map(timelineCuePayload),
+    };
+  }
+
+  function displaySourceForCue(cue) {
+    if (state.settings.sourceDisplayMode !== "clean") {
+      return cue.source;
+    }
+    return core.cleanCaptionSourceText(cue.source, {
+      captionKind: state.captionKind,
+      restoreFinalPunctuation: false,
+    });
+  }
+
+  function segmentForCue(cue) {
+    return state.segments.find((segment) => segment.cueIds.includes(cue.id)) || null;
+  }
+
+  function fullTranslationForCue(cue) {
+    const segment = segmentForCue(cue);
+    if (!segment) {
+      return "";
+    }
+    return core.normalizeCaptionText(
+      state.segmentTranslations[segment.id]?.fullTranslation,
+    );
+  }
+
+  function translationForCue(cue) {
+    const cueTranslation = core.normalizeCaptionText(cue.translation);
+    const fullTranslation = fullTranslationForCue(cue);
+    if (state.settings.syncStrategy === "segment" && fullTranslation) {
+      return fullTranslation;
+    }
+    if (
+      state.settings.syncStrategy === "hybrid" &&
+      fullTranslation &&
+      fullTranslation !== cueTranslation
+    ) {
+      return `${cueTranslation} 完整句：${fullTranslation}`;
+    }
+    return cueTranslation;
+  }
+
+  async function requestVideoMemoryAnalysis() {
+    if (
+      state.timelineMode !== "track" ||
+      state.videoMemoryInFlight ||
+      !state.settings.enabled ||
+      !state.hasApiKey ||
+      state.timeline.length === 0
+    ) {
+      return;
+    }
+
+    const loadToken = state.timelineLoadToken;
+    state.videoMemoryInFlight = true;
+    try {
+      const response = await sendMessage(
+        {
+          type: "YTCT_ANALYZE_VIDEO_MEMORY",
+          payload: {
+            videoId: state.videoId,
+            cues: state.timeline.map(timelineCuePayload),
+            captionKind: state.captionKind,
+            metadata: readMetadata(),
+          },
+        },
+        VIDEO_MEMORY_MESSAGE_TIMEOUT_MS,
+      );
+      if (loadToken !== state.timelineLoadToken) {
+        return;
+      }
+      state.videoMemory = response?.ok ? response.result?.videoMemory || null : null;
+      updateOverlayDiagnostics({
+        videoMemoryReady: Boolean(state.videoMemory),
+      });
+    } catch (_error) {
+      if (loadToken === state.timelineLoadToken) {
+        state.videoMemory = null;
+      }
+    } finally {
+      if (loadToken === state.timelineLoadToken) {
+        state.videoMemoryInFlight = false;
+      }
+    }
   }
 
   async function prefetchTimelineTranslations(options = {}) {
@@ -1240,17 +1414,17 @@
     updateOverlayDiagnostics();
 
     try {
+      const batchContext = batchContextForTimeline(batch);
       const response = await sendMessage(
         {
           type: "YTCT_TRANSLATE_BATCH",
           payload: {
             videoId: state.videoId,
-            cues: batch.map((cue) => ({
-              id: cue.id,
-              start: cue.start,
-              end: cue.end,
-              source: cue.source,
-            })),
+            cues: batch.map(timelineCuePayload),
+            nonOutputContextBefore: batchContext.nonOutputContextBefore,
+            nonOutputContextAfter: batchContext.nonOutputContextAfter,
+            captionKind: state.captionKind,
+            videoMemory: state.videoMemory,
             metadata: readMetadata(),
           },
         },
@@ -1264,6 +1438,19 @@
         result[item.id] = item.translation;
         return result;
       }, {});
+      const segmentTranslationMap = (
+        response?.ok ? response.result?.segmentTranslations || [] : []
+      ).reduce((result, item) => {
+        result[item.id] = {
+          cleanSource: item.cleanSource || "",
+          fullTranslation: item.fullTranslation || "",
+        };
+        return result;
+      }, {});
+      state.segmentTranslations = {
+        ...state.segmentTranslations,
+        ...segmentTranslationMap,
+      };
 
       batch.forEach((cue) => {
         const translation = core.normalizeCaptionText(translationMap[cue.id]);
@@ -1326,7 +1513,12 @@
     state.history = [];
     state.cache.clear();
     state.timeline = [];
+    state.segments = [];
+    state.segmentTranslations = {};
     state.timelineMode = "loading";
+    state.captionKind = "unknown";
+    state.videoMemory = null;
+    state.videoMemoryInFlight = false;
     state.batchInFlight = false;
     state.fallbackInFlight = false;
     state.queuedFallbackText = "";
