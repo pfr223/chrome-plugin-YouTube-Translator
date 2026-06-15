@@ -3,8 +3,11 @@ importScripts("core.js");
 const core = globalThis.YTContextTranslatorCore;
 const SETTINGS_KEY = "ytContextTranslatorSettings";
 const translationCache = new Map();
+const summaryCache = new Map();
 const MAX_CACHE_ITEMS = 300;
+const MAX_SUMMARY_CACHE_ITEMS = 40;
 const API_TIMEOUT_MS = 18000;
+const SUMMARY_API_TIMEOUT_MS = 45000;
 
 function storageGet(keys) {
   return new Promise((resolve) => chrome.storage.local.get(keys, resolve));
@@ -64,6 +67,16 @@ function rememberCache(key, value) {
   translationCache.set(key, value);
   while (translationCache.size > MAX_CACHE_ITEMS) {
     translationCache.delete(translationCache.keys().next().value);
+  }
+}
+
+function rememberSummaryCache(key, value) {
+  if (summaryCache.has(key)) {
+    summaryCache.delete(key);
+  }
+  summaryCache.set(key, value);
+  while (summaryCache.size > MAX_SUMMARY_CACHE_ITEMS) {
+    summaryCache.delete(summaryCache.keys().next().value);
   }
 }
 
@@ -265,6 +278,85 @@ async function fetchBatchTranslation(payload) {
   return { translations, provider: settings.provider, model };
 }
 
+async function fetchVideoSummary(payload) {
+  const settings = await getSettings();
+  if (!settings.enabled) {
+    return { skipped: true, reason: "disabled" };
+  }
+  if (!core.getApiKeyForProvider(settings)) {
+    throw new Error("请先在扩展设置中填写 API key。");
+  }
+
+  const cues = (Array.isArray(payload.cues) ? payload.cues : [])
+    .map((cue) => ({
+      id: core.normalizeCaptionText(cue.id),
+      start: Number(cue.start),
+      end: Number(cue.end),
+      source: core.normalizeCaptionText(cue.source),
+    }))
+    .filter((cue) => cue.source);
+
+  if (cues.length === 0) {
+    throw new Error("当前视频没有可用完整字幕，暂不能总结。");
+  }
+
+  const model = core.getModelForProvider(settings);
+  const cacheKey = core.createVideoSummaryCacheKey({
+    provider: settings.provider,
+    model,
+    videoId: payload.videoId || "",
+    customInstructions: settings.customInstructions,
+    cues,
+  });
+
+  if (!payload.force && summaryCache.has(cacheKey)) {
+    return {
+      ...summaryCache.get(cacheKey),
+      cached: true,
+    };
+  }
+
+  const prompt = core.buildVideoSummaryPrompt({
+    cues,
+    metadata: payload.metadata || {},
+    customInstructions: settings.customInstructions,
+  });
+  const { url, requestOptions } = buildAuthorizedRequest(
+    settings,
+    prompt,
+    3072,
+  );
+
+  const response = await fetchWithTimeout(
+    url,
+    requestOptions,
+    SUMMARY_API_TIMEOUT_MS,
+  );
+  if (!response.ok) {
+    const message = await response.text();
+    throw new Error(`API 请求失败：${response.status} ${message.slice(0, 240)}`);
+  }
+
+  const responseText = await readResponseText(settings.provider, response);
+  const summary = core.parseVideoSummaryResponse(responseText);
+  if (
+    !summary.summary &&
+    summary.highlights.length === 0 &&
+    summary.chapters.length === 0
+  ) {
+    throw new Error("API 没有返回可用摘要。");
+  }
+
+  const result = {
+    summary,
+    provider: settings.provider,
+    model,
+    cached: false,
+  };
+  rememberSummaryCache(cacheKey, result);
+  return result;
+}
+
 async function saveSettings(nextSettings) {
   const previous = await getSettings();
   const incoming = { ...(nextSettings || {}) };
@@ -323,6 +415,13 @@ chrome.runtime.onMessage.addListener((message, _sender, sendResponse) => {
 
   if (message.type === "YTCT_TRANSLATE_BATCH") {
     fetchBatchTranslation(message.payload || {})
+      .then((result) => sendResponse({ ok: true, result }))
+      .catch((error) => sendResponse({ ok: false, error: error.message }));
+    return true;
+  }
+
+  if (message.type === "YTCT_SUMMARIZE_VIDEO") {
+    fetchVideoSummary(message.payload || {})
       .then((result) => sendResponse({ ok: true, result }))
       .catch((error) => sendResponse({ ok: false, error: error.message }));
     return true;
