@@ -944,6 +944,322 @@
     return {};
   }
 
+  function formatSummaryTimestamp(seconds) {
+    const totalSeconds = Math.max(0, Math.floor(Number(seconds) || 0));
+    const hours = Math.floor(totalSeconds / 3600);
+    const minutes = Math.floor((totalSeconds % 3600) / 60);
+    const remainingSeconds = totalSeconds % 60;
+    const pad = (value) => String(value).padStart(2, "0");
+    if (hours > 0) {
+      return `${hours}:${pad(minutes)}:${pad(remainingSeconds)}`;
+    }
+    return `${pad(minutes)}:${pad(remainingSeconds)}`;
+  }
+
+  function normalizedSummaryCues(cues) {
+    return (Array.isArray(cues) ? cues : [])
+      .map((cue) => {
+        const start = Math.max(0, Number(cue?.start) || 0);
+        const rawEnd = Number(cue?.end);
+        const end = Number.isFinite(rawEnd) && rawEnd >= start ? rawEnd : start;
+        return {
+          start,
+          end,
+          source: normalizeCaptionText(cue?.source),
+        };
+      })
+      .filter((cue) => cue.source)
+      .sort((first, second) => first.start - second.start);
+  }
+
+  function limitSummarySegmentText(text, maxChars) {
+    const normalized = normalizeCaptionText(text);
+    if (normalized.length <= maxChars) {
+      return normalized;
+    }
+    if (maxChars <= 3) {
+      return normalized.slice(0, maxChars);
+    }
+    return `${normalized.slice(0, maxChars - 3).trimEnd()}...`;
+  }
+
+  function totalSegmentChars(segments) {
+    return segments.reduce((total, segment) => total + segment.text.length, 0);
+  }
+
+  function trimSelectedSummarySegments(segments, maxChars) {
+    const selected = segments.map((segment) => ({ ...segment }));
+
+    while (selected.length > 2 && totalSegmentChars(selected) > maxChars) {
+      selected.splice(Math.floor(selected.length / 2), 1);
+    }
+
+    let totalChars = totalSegmentChars(selected);
+    if (totalChars <= maxChars || selected.length === 0) {
+      return selected;
+    }
+
+    const perSegmentChars = Math.max(1, Math.floor(maxChars / selected.length));
+    selected.forEach((segment) => {
+      segment.text = limitSummarySegmentText(segment.text, perSegmentChars);
+    });
+
+    totalChars = totalSegmentChars(selected);
+    while (totalChars > maxChars && selected.some((segment) => segment.text)) {
+      const segment = [...selected].reverse().find((item) => item.text);
+      const overflow = totalChars - maxChars;
+      segment.text = segment.text.slice(
+        0,
+        Math.max(0, segment.text.length - overflow),
+      );
+      totalChars = totalSegmentChars(selected);
+    }
+
+    return selected.filter((segment) => segment.text);
+  }
+
+  function compactTimelineForSummary(cues, options = {}) {
+    const maxChars = clampInteger(options.maxChars, 1, 80000, 50000);
+    const maxSegmentChars = clampInteger(options.maxSegmentChars, 20, 2000, 700);
+    const rawMaxMergeGapSeconds = Number(options.maxMergeGapSeconds);
+    const maxMergeGapSeconds = Number.isFinite(rawMaxMergeGapSeconds)
+      ? Math.max(0, rawMaxMergeGapSeconds)
+      : 0.5;
+    const segments = [];
+
+    for (const cue of normalizedSummaryCues(cues)) {
+      const source = limitSummarySegmentText(cue.source, maxSegmentChars);
+      const previous = segments.at(-1);
+      const gap = previous ? cue.start - previous.end : 0;
+      const mergedText = previous ? `${previous.text} ${source}`.trim() : source;
+      if (previous && gap <= maxMergeGapSeconds && mergedText.length <= maxSegmentChars) {
+        previous.end = Math.max(previous.end, cue.end || cue.start);
+        previous.text = mergedText;
+      } else {
+        segments.push({
+          start: cue.start,
+          end: cue.end || cue.start,
+          text: source,
+        });
+      }
+    }
+
+    const totalChars = totalSegmentChars(segments);
+    if (totalChars <= maxChars) {
+      return segments;
+    }
+    if (segments.length <= 2) {
+      return trimSelectedSummarySegments(segments, maxChars);
+    }
+
+    const averageSegmentChars = Math.max(1, Math.ceil(totalChars / segments.length));
+    const targetCount = Math.min(
+      segments.length,
+      Math.max(2, Math.floor(maxChars / averageSegmentChars)),
+    );
+    const selectedIndexes = new Set([0, segments.length - 1]);
+
+    for (
+      let step = 1;
+      selectedIndexes.size < targetCount && step < targetCount * 3;
+      step += 1
+    ) {
+      const index = Math.round(
+        (step * (segments.length - 1)) / Math.max(1, targetCount - 1),
+      );
+      selectedIndexes.add(Math.min(segments.length - 1, Math.max(0, index)));
+    }
+
+    const selected = [...selectedIndexes]
+      .sort((first, second) => first - second)
+      .map((index) => segments[index]);
+
+    return trimSelectedSummarySegments(selected, maxChars);
+  }
+
+  function buildVideoSummaryPrompt(options = {}) {
+    const {
+      cues = [],
+      metadata = {},
+      customInstructions = "",
+      maxChars = 50000,
+      maxSegmentChars = 700,
+    } = options || {};
+    const segments = compactTimelineForSummary(cues, { maxChars, maxSegmentChars });
+    const lines = [
+      "Task: summarize this YouTube video in Simplified Chinese.",
+      "Use only the caption content and video metadata. Do not invent details.",
+      "Write concise course-note style Chinese for a learner reviewing the video.",
+      "Preserve technical terms, code, formulas, variable names, product names, and model names when translating them would reduce clarity.",
+      "",
+      "Default course summarization guidance:",
+      ...COURSE_TRANSLATION_GUIDANCE.map((line) => `- ${line}`),
+      "",
+      'Strict JSON contract: return only {"summary":"...","highlights":["..."],"chapters":[{"start":0,"title":"...","points":["..."]}]}',
+      "",
+      "Output requirements:",
+      "- summary: 150-250 Chinese characters when the video has enough content.",
+      "- highlights: 3-6 concise bullets.",
+      "- chapters: 5-10 timestamped sections when the source is long enough.",
+      "- chapter start values must be seconds and close to real caption timestamps.",
+      "- short videos may use fewer highlights and chapters but must keep the same JSON shape.",
+      "",
+      "Video metadata:",
+      `- Title: ${safeLine(metadata.title) || "Unknown"}`,
+      `- Channel: ${safeLine(metadata.channel) || "Unknown"}`,
+      `- URL: ${safeLine(metadata.url) || "Unknown"}`,
+      "",
+      "Timestamped captions:",
+    ];
+
+    if (segments.length === 0) {
+      lines.push("- None");
+    } else {
+      segments.forEach((segment) => {
+        lines.push(
+          `- [${formatSummaryTimestamp(segment.start)}-${formatSummaryTimestamp(segment.end)}] ${safeLine(segment.text)}`,
+        );
+      });
+    }
+
+    if (normalizeCaptionText(customInstructions)) {
+      lines.push(
+        "",
+        "User translation and summarization preferences:",
+        normalizeCaptionText(customInstructions),
+      );
+    }
+
+    return lines.join("\n");
+  }
+
+  function extractJsonObjectCandidates(text) {
+    const source = String(text || "");
+    const candidates = [];
+
+    for (let start = 0; start < source.length; start += 1) {
+      if (source[start] !== "{") {
+        continue;
+      }
+
+      let depth = 0;
+      let inString = false;
+      let escaped = false;
+      for (let index = start; index < source.length; index += 1) {
+        const char = source[index];
+        if (escaped) {
+          escaped = false;
+          continue;
+        }
+        if (char === "\\") {
+          escaped = true;
+          continue;
+        }
+        if (char === '"') {
+          inString = !inString;
+          continue;
+        }
+        if (inString) {
+          continue;
+        }
+        if (char === "{") {
+          depth += 1;
+        } else if (char === "}") {
+          depth -= 1;
+          if (depth === 0) {
+            const candidate = source.slice(start, index + 1);
+            if (/"(?:summary|highlights|chapters)"\s*:/.test(candidate)) {
+              candidates.push(candidate);
+            }
+            break;
+          }
+        }
+      }
+    }
+
+    return candidates;
+  }
+
+  function normalizeVideoSummary(value) {
+    const summary = cleanTranslationText(value?.summary);
+    const highlights = (Array.isArray(value?.highlights) ? value.highlights : [])
+      .map((item) => cleanTranslationText(item))
+      .filter(Boolean);
+    const chapters = (Array.isArray(value?.chapters) ? value.chapters : [])
+      .map((chapter) => {
+        const rawStart = Number(chapter?.start);
+        const start = Number.isFinite(rawStart) && rawStart > 0 ? rawStart : 0;
+        const title = cleanTranslationText(chapter?.title);
+        const points = (Array.isArray(chapter?.points) ? chapter.points : [])
+          .map((point) => cleanTranslationText(point))
+          .filter(Boolean);
+        return { start, title, points };
+      })
+      .filter((chapter) => chapter.title || chapter.points.length > 0);
+
+    return { summary, highlights, chapters };
+  }
+
+  function parseVideoSummaryResponse(text) {
+    const stripped = stripFences(text);
+    const candidates = [
+      stripped,
+      ...extractJsonObjectCandidates(stripped),
+    ].filter(Boolean);
+    const seen = new Set();
+
+    for (const candidate of candidates) {
+      if (seen.has(candidate)) {
+        continue;
+      }
+      seen.add(candidate);
+      try {
+        const normalized = normalizeVideoSummary(JSON.parse(candidate));
+        if (
+          normalized.summary ||
+          normalized.highlights.length > 0 ||
+          normalized.chapters.length > 0
+        ) {
+          return normalized;
+        }
+      } catch (_error) {
+        // Try the next candidate because providers sometimes wrap JSON in prose.
+      }
+    }
+
+    return { summary: "", highlights: [], chapters: [] };
+  }
+
+  function hashString(value) {
+    let hash = 2166136261;
+    const text = String(value || "");
+    for (let index = 0; index < text.length; index += 1) {
+      hash ^= text.charCodeAt(index);
+      hash = Math.imul(hash, 16777619);
+    }
+    return (hash >>> 0).toString(36);
+  }
+
+  function createVideoSummaryCacheKey(options = {}) {
+    const transcriptKey = normalizedSummaryCues(options.cues)
+      .map((cue) =>
+        [
+          roundSeconds(cue.start),
+          roundSeconds(cue.end),
+          normalizeCaptionText(cue.source).toLowerCase(),
+        ].join(":"),
+      )
+      .join("||");
+
+    return [
+      normalizeCaptionText(options.provider).toLowerCase(),
+      normalizeCaptionText(options.model).toLowerCase(),
+      normalizeCaptionText(options.videoId),
+      normalizeCaptionText(options.customInstructions).toLowerCase(),
+      hashString(transcriptKey),
+    ].join("::");
+  }
+
   function buildTranslationPrompt(options) {
     const {
       currentText,
@@ -1202,6 +1518,10 @@
     buildTranslationPrompt,
     buildBatchTranslationPrompt,
     parseBatchTranslationResponse,
+    compactTimelineForSummary,
+    buildVideoSummaryPrompt,
+    parseVideoSummaryResponse,
+    createVideoSummaryCacheKey,
     extractTranslationFromText,
     extractProviderResponseText,
     parseProviderResponse,
