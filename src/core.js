@@ -28,7 +28,6 @@
     "gemini-3.1-flash",
     "gemini-3.1-flash-lite",
   ]);
-  const SUMMARY_SEGMENT_PARTS = Symbol("summarySegmentParts");
 
   function normalizeCaptionText(value) {
     return String(value || "")
@@ -946,7 +945,10 @@
   }
 
   function formatSummaryTimestamp(seconds) {
-    const totalSeconds = Math.max(0, Math.floor(Number(seconds) || 0));
+    const rawSeconds = Number(seconds);
+    const totalSeconds = Number.isFinite(rawSeconds)
+      ? Math.max(0, Math.floor(rawSeconds))
+      : 0;
     const hours = Math.floor(totalSeconds / 3600);
     const minutes = Math.floor((totalSeconds % 3600) / 60);
     const remainingSeconds = totalSeconds % 60;
@@ -960,8 +962,9 @@
   function normalizedSummaryCues(cues) {
     return (Array.isArray(cues) ? cues : [])
       .map((cue) => {
-        const start = Math.max(0, Number(cue?.start) || 0);
+        const rawStart = Number(cue?.start);
         const rawEnd = Number(cue?.end);
+        const start = Number.isFinite(rawStart) && rawStart > 0 ? rawStart : 0;
         const end = Number.isFinite(rawEnd) && rawEnd >= start ? rawEnd : start;
         return {
           start,
@@ -989,12 +992,7 @@
   }
 
   function trimSelectedSummarySegments(segments, maxChars) {
-    const selected = segments.map((segment) =>
-      attachSummarySegmentParts(
-        { ...segment },
-        getSummarySegmentParts(segment).map((part) => ({ ...part })),
-      ),
-    );
+    const selected = segments.map((segment) => ({ ...segment }));
 
     while (selected.length > 2 && totalSegmentChars(selected) > maxChars) {
       selected.splice(Math.floor(selected.length / 2), 1);
@@ -1036,25 +1034,18 @@
     for (const cue of normalizedSummaryCues(cues)) {
       const source = limitSummarySegmentText(cue.source, maxSegmentChars);
       const end = cue.end || cue.start;
-      const part = { start: cue.start, end, text: source };
       const previous = segments.at(-1);
       const gap = previous ? cue.start - previous.end : 0;
       const mergedText = previous ? `${previous.text} ${source}`.trim() : source;
       if (previous && gap <= maxMergeGapSeconds && mergedText.length <= maxSegmentChars) {
         previous.end = Math.max(previous.end, end);
         previous.text = mergedText;
-        getSummarySegmentParts(previous).push(part);
       } else {
-        segments.push(
-          attachSummarySegmentParts(
-            {
-              start: cue.start,
-              end,
-              text: source,
-            },
-            [part],
-          ),
-        );
+        segments.push({
+          start: cue.start,
+          end,
+          text: source,
+        });
       }
     }
 
@@ -1091,36 +1082,42 @@
     return trimSelectedSummarySegments(selected, maxChars);
   }
 
-  function attachSummarySegmentParts(segment, parts) {
-    Object.defineProperty(segment, SUMMARY_SEGMENT_PARTS, {
-      value: parts,
-      writable: true,
-      enumerable: false,
-      configurable: true,
-    });
-    return segment;
-  }
-
-  function getSummarySegmentParts(segment) {
-    return Array.isArray(segment?.[SUMMARY_SEGMENT_PARTS])
-      ? segment[SUMMARY_SEGMENT_PARTS]
-      : [];
-  }
-
   function formatSummarySegmentForPrompt(segment) {
-    const parts = getSummarySegmentParts(segment);
-    const partsText = normalizeCaptionText(parts.map((part) => part.text).join(" "));
-    if (parts.length > 1 && partsText === normalizeCaptionText(segment.text)) {
-      return parts
-        .map(
-          (part) =>
-            `[${formatSummaryTimestamp(part.start)}-${formatSummaryTimestamp(part.end)}] ${safeLine(part.text)}`,
-        )
-        .join(" ");
-    }
     return `[${formatSummaryTimestamp(segment.start)}-${formatSummaryTimestamp(
       segment.end,
     )}] ${safeLine(segment.text)}`;
+  }
+
+  function totalPromptCaptionChars(segments) {
+    return segments.reduce(
+      (total, segment) => total + formatSummarySegmentForPrompt(segment).length + 2,
+      0,
+    );
+  }
+
+  function trimSummarySegmentsForPrompt(segments, maxChars) {
+    const selected = segments.map((segment) => ({ ...segment }));
+
+    while (selected.length > 2 && totalPromptCaptionChars(selected) > maxChars) {
+      selected.splice(Math.floor(selected.length / 2), 1);
+    }
+
+    while (
+      selected.length > 0 &&
+      totalPromptCaptionChars(selected) > maxChars &&
+      selected.some((segment) => segment.text)
+    ) {
+      const longest = selected.reduce((result, segment) =>
+        segment.text.length > result.text.length ? segment : result,
+      );
+      const overflow = totalPromptCaptionChars(selected) - maxChars;
+      longest.text = longest.text.slice(
+        0,
+        Math.max(0, longest.text.length - overflow),
+      );
+    }
+
+    return selected.filter((segment) => normalizeCaptionText(segment.text));
   }
 
   function buildVideoSummaryPrompt(options = {}) {
@@ -1130,8 +1127,24 @@
       customInstructions = "",
       maxChars = 50000,
       maxSegmentChars = 700,
+      maxMergeGapSeconds,
     } = options || {};
-    const segments = compactTimelineForSummary(cues, { maxChars, maxSegmentChars });
+    const summaryMaxChars = clampInteger(maxChars, 1, 80000, 50000);
+    const summaryCueCount = normalizedSummaryCues(cues).length;
+    const mergeGap =
+      Number.isFinite(Number(maxMergeGapSeconds))
+        ? maxMergeGapSeconds
+        : summaryCueCount <= 2
+          ? 0.5
+          : undefined;
+    const segments = trimSummarySegmentsForPrompt(
+      compactTimelineForSummary(cues, {
+        maxChars: summaryMaxChars,
+        maxSegmentChars,
+        maxMergeGapSeconds: mergeGap,
+      }),
+      summaryMaxChars,
+    );
     const lines = [
       "Task: summarize this YouTube video in Simplified Chinese.",
       "Use only the caption content and video metadata. Do not invent details.",
@@ -1225,17 +1238,19 @@
   }
 
   function normalizeVideoSummary(value) {
-    const summary = cleanTranslationText(value?.summary);
+    const cleanSummaryString = (item) =>
+      typeof item === "string" ? cleanTranslationText(item) : "";
+    const summary = cleanSummaryString(value?.summary);
     const highlights = (Array.isArray(value?.highlights) ? value.highlights : [])
-      .map((item) => cleanTranslationText(item))
+      .map((item) => cleanSummaryString(item))
       .filter(Boolean);
     const chapters = (Array.isArray(value?.chapters) ? value.chapters : [])
       .map((chapter) => {
         const rawStart = Number(chapter?.start);
         const start = Number.isFinite(rawStart) && rawStart > 0 ? rawStart : 0;
-        const title = cleanTranslationText(chapter?.title);
+        const title = cleanSummaryString(chapter?.title);
         const points = (Array.isArray(chapter?.points) ? chapter.points : [])
-          .map((point) => cleanTranslationText(point))
+          .map((point) => cleanSummaryString(point))
           .filter(Boolean);
         return { start, title, points };
       })
@@ -1245,6 +1260,9 @@
   }
 
   function parseVideoSummaryResponse(text) {
+    if (typeof text !== "string") {
+      return { summary: "", highlights: [], chapters: [] };
+    }
     const stripped = stripFences(text);
     const candidates = [
       stripped,
