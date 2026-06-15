@@ -354,8 +354,31 @@
     return element;
   }
 
+  function hasCurrentVideoId() {
+    return Boolean(core.getYouTubeVideoId(location.href));
+  }
+
+  function resetSummaryState() {
+    state.summaryCollapsed = false;
+    state.summaryStatus = "idle";
+    state.summaryResult = null;
+    state.summaryError = "";
+    state.summaryCached = false;
+    state.summaryRequestId += 1;
+  }
+
+  function removeSummaryPanel() {
+    document.querySelectorAll(".ytct-summary-panel").forEach((element) => {
+      element.remove();
+    });
+    state.summaryPanel = null;
+  }
+
   function renderSummaryPanel() {
     const panel = ensureSummaryPanel();
+    if (!panel) {
+      return;
+    }
     const body = panel.querySelector(".ytct-summary-body");
     const title = panel.querySelector(".ytct-summary-title");
     const collapseButton = panel.querySelector(
@@ -471,6 +494,11 @@
   }
 
   function ensureSummaryPanel() {
+    if (!hasCurrentVideoId()) {
+      removeSummaryPanel();
+      return null;
+    }
+
     document.querySelectorAll(".ytct-summary-panel").forEach((element) => {
       if (element !== state.summaryPanel) {
         element.remove();
@@ -653,6 +681,9 @@
   }
 
   function getSummaryAvailability() {
+    if (!hasCurrentVideoId()) {
+      return { available: false, reason: "当前页面不是视频播放页" };
+    }
     if (!state.settings.enabled) {
       return { available: false, reason: "扩展已关闭" };
     }
@@ -835,6 +866,10 @@
   }
 
   function switchToFallback(reason) {
+    if (!hasCurrentVideoId()) {
+      removeSummaryPanel();
+      return;
+    }
     state.timelineMode = "fallback";
     clearFallbackDebounce();
     updateOverlayDiagnostics({ timelineError: reason || "fallback" });
@@ -1026,6 +1061,11 @@
   }
 
   async function loadCaptionTimeline() {
+    if (!hasCurrentVideoId()) {
+      removeSummaryPanel();
+      return;
+    }
+
     const loadToken = ++state.timelineLoadToken;
     state.timelineMode = "loading";
     state.timeline = [];
@@ -1076,7 +1116,7 @@
       }
 
       const { format, timeline } = result;
-      if (loadToken !== state.timelineLoadToken) {
+      if (loadToken !== state.timelineLoadToken || !hasCurrentVideoId()) {
         return;
       }
       if (timeline.length === 0) {
@@ -1096,7 +1136,7 @@
       }
       renderSummaryPanel();
     } catch (_error) {
-      if (loadToken === state.timelineLoadToken) {
+      if (loadToken === state.timelineLoadToken && hasCurrentVideoId()) {
         switchToFallback(_error.message || "load-failed");
       }
     }
@@ -1300,12 +1340,14 @@
     state.transcriptRetryTimer = 0;
     window.clearInterval(state.timelineTimer);
     state.timelineTimer = 0;
+    state.timelineLoadToken += 1;
     state.videoId = core.getYouTubeVideoId(location.href);
-    state.summaryStatus = "idle";
-    state.summaryResult = null;
-    state.summaryError = "";
-    state.summaryCached = false;
-    state.summaryRequestId += 1;
+    resetSummaryState();
+    if (!hasCurrentVideoId()) {
+      removeSummaryPanel();
+      renderOverlay("", "ready");
+      return;
+    }
     renderSummaryPanel();
     renderOverlay("", "ready");
     loadCaptionTimeline();
@@ -1522,12 +1564,12 @@
       state.settings = core.normalizeSettings(message.settings || {});
       state.hasApiKey = Boolean(message.settings?.hasApiKey);
       applyOverlayStyle();
-      state.summaryStatus = "idle";
-      state.summaryResult = null;
-      state.summaryError = "";
-      state.summaryCached = false;
-      state.summaryRequestId += 1;
-      renderSummaryPanel();
+      resetSummaryState();
+      if (hasCurrentVideoId()) {
+        renderSummaryPanel();
+      } else {
+        removeSummaryPanel();
+      }
       state.timeline.forEach((cue) => {
         cue.translation = "";
         cue.status = "pending";
@@ -1544,9 +1586,13 @@
   refreshSettings().finally(() => {
     state.videoId = core.getYouTubeVideoId(location.href);
     ensureOverlay();
-    ensureSummaryPanel();
-    renderSummaryPanel();
     startObservers();
-    loadCaptionTimeline();
+    if (hasCurrentVideoId()) {
+      ensureSummaryPanel();
+      renderSummaryPanel();
+      loadCaptionTimeline();
+    } else {
+      removeSummaryPanel();
+    }
   });
 })();
