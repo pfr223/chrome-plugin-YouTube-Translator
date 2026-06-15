@@ -1,6 +1,15 @@
 # YouTube Context Translator
 
-Chrome MV3 插件：读取 YouTube 英文字幕时间轴，先做全文预分析和语义分段，再把完整句翻译回填到原始 cue 时间轴，生成同步中文字幕覆盖层。
+Chrome MV3 插件：读取 YouTube 英文字幕时间轴，先做全文预分析和语义分段，再把完整句翻译回填到原始 cue 时间轴，生成同步中文字幕覆盖层；同时支持基于当前视频完整字幕的一键中文摘要。
+
+## 新版本功能概览
+
+- **当前视频总结**：在 YouTube 视频页右侧或底部显示「视频总结」面板，点击后生成中文摘要、亮点和可跳转章节要点。
+- **长视频章节锚点**：摘要 prompt 会按完整时间轴生成固定章节锚点，1 小时或更长视频不会只总结前 20 分钟。
+- **语义分段翻译**：短字幕 cue 会先合并成完整语义段，模型按完整句理解后，再把翻译回填到原始时间轴。
+- **VideoMemory 全文预分析**：视频打开后异步提取 summary、领域、术语表、实体和 ASR 纠错信息，后续字幕翻译会带上全局上下文。
+- **用户词表**：可在设置页锁定术语翻译，优先级高于模型默认翻译和 VideoMemory。
+- **显示与同步策略**：支持原始/清洗后英文显示，以及 cue 级同步、segment 级同步、学习模式等不同字幕展示方式。
 
 ## API 选择
 
@@ -27,14 +36,6 @@ Chrome MV3 插件：读取 YouTube 英文字幕时间轴，先做全文预分析
 5. 点击扩展图标，选择 API，并填写 API key
 6. 打开 YouTube 视频并开启英文字幕
 
-如果要测试翻译管线增强版本，先切到 feature 分支：
-
-```bash
-git fetch origin
-git switch codex/translation-pipeline-v2
-git pull --ff-only
-```
-
 ## 工作方式
 
 - `src/content_script.js` 优先读取 YouTube Transcript 时间轴，按完整 cue 同步显示双语字幕；必要时才回退到播放器字幕 DOM。
@@ -47,6 +48,18 @@ git pull --ff-only
 - 视频打开后会异步构建 `VideoMemory`：按字幕 chunk 做 map 分析，再 reduce 成 summary、domain、styleGuide、glossary、entities、asrCorrections。后续 batch 翻译会携带压缩后的全局记忆和局部前后文。
 - VideoMemory 会写入本机 Chrome storage，并维护频道级记忆，避免同一视频重复做全文预分析。
 - batch prompt 包含 `non_output_context_before`、`output_segments`、`non_output_context_after`、`videoMemory` 和用户词表；模型只输出 `output_segments` 的翻译。
+
+## 视频总结
+
+1. 打开 YouTube 视频，并确保页面能加载英文字幕或 transcript。
+2. 插件会先复用同一份完整字幕时间轴，不会读取音频，也不会只拿当前屏幕上的几句字幕。
+3. 点击页面内「视频总结」面板的生成按钮后，后台会调用当前选择的 API 生成结构化 JSON。
+4. 输出包含三部分：
+   - `摘要`: 用中文概括视频主题、结论和主要内容。
+   - `亮点`: 提炼最值得注意的观点、工具、步骤或示例。
+   - `章节要点`: 按固定时间锚点覆盖完整视频，点击章节可跳转到对应时间。
+
+长视频会按时间轴自动设置章节锚点。例如 1 小时视频通常会覆盖 `00:00`、`06:00`、`12:00`、`18:00`、`24:00`、`30:00`、`36:00`、`42:00`、`48:00`、`54:00` 等位置；2 小时视频会继续按固定间隔覆盖后续内容，避免模型只输出开头部分。
 
 ## 常用设置
 
@@ -78,8 +91,8 @@ Bellman equation = Bellman equation（贝尔曼方程）
 ## 缓存与版本控制
 
 - 翻译缓存 key 包含 provider、model、videoId、source/target language、promptVersion、glossaryVersion、segmentId 和 sourceClean hash，避免 prompt 或词表变化后复用旧译文。
+- 视频总结缓存 key 包含 provider、model、videoId、摘要 prompt 版本、用户偏好和字幕内容 hash；章节锚点策略更新后不会复用旧摘要。
 - 开发翻译管线前已创建远端备份分支：`backup/pre-translation-pipeline-2026-06-09`，指向基线 `7e570f0`。
-- 翻译管线增强开发分支：`codex/translation-pipeline-v2`。
 
 ## 开发
 
