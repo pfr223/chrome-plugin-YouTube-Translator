@@ -766,6 +766,19 @@ test("parses provider video summary responses from JSON variants", () => {
 
   assert.deepEqual(
     core.parseVideoSummaryResponse(
+      '{"summary":"原始 JSON 摘要","highlights":["原始亮点"],"chapters":[{"start":12,"title":"原始章节","points":["原始要点"]}]}',
+    ),
+    {
+      summary: "原始 JSON 摘要",
+      highlights: ["原始亮点"],
+      chapters: [
+        { start: 12, title: "原始章节", points: ["原始要点"] },
+      ],
+    },
+  );
+
+  assert.deepEqual(
+    core.parseVideoSummaryResponse(
       'Here is the result:\n{"summary":"短视频摘要","highlights":["要点"],"chapters":[]}',
     ),
     {
