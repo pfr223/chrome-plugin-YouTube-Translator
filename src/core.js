@@ -1120,6 +1120,20 @@
     return selected.filter((segment) => normalizeCaptionText(segment.text));
   }
 
+  function summaryTimelineRange(cues) {
+    const normalized = normalizedSummaryCues(cues);
+    if (normalized.length === 0) {
+      return { start: 0, end: 0 };
+    }
+    return {
+      start: normalized[0].start,
+      end: normalized.reduce(
+        (latest, cue) => Math.max(latest, cue.end || cue.start),
+        normalized[0].end || normalized[0].start,
+      ),
+    };
+  }
+
   function buildVideoSummaryPrompt(options = {}) {
     const {
       cues = [],
@@ -1145,6 +1159,9 @@
       }),
       summaryMaxChars,
     );
+    const timelineRange = summaryTimelineRange(cues);
+    const timelineStart = formatSummaryTimestamp(timelineRange.start);
+    const timelineEnd = formatSummaryTimestamp(timelineRange.end);
     const lines = [
       "Task: summarize this YouTube video in Simplified Chinese.",
       "Use only the caption content and video metadata. Do not invent details.",
@@ -1161,6 +1178,9 @@
       "- highlights: 3-6 concise bullets.",
       "- chapters: 5-10 timestamped sections when the source is long enough.",
       "- chapter start values must be seconds and close to real caption timestamps.",
+      `- Timestamp range: ${timelineStart}-${timelineEnd}. Chapters must cover the entire timestamp range, not only the beginning.`,
+      `- Include a final chapter near ${timelineEnd} when late captions exist.`,
+      "- Do not stop chapters after the opening or first third; distribute chapters across early, middle, and late sections.",
       "- short videos may use fewer highlights and chapters but must keep the same JSON shape.",
       "",
       "Video metadata:",
