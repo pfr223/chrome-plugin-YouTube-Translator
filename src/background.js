@@ -294,7 +294,7 @@ async function fetchVideoSummary(payload) {
       end: Number(cue.end),
       source: core.normalizeCaptionText(cue.source),
     }))
-    .filter((cue) => cue.source);
+    .filter((cue) => cue.id && cue.source);
 
   if (cues.length === 0) {
     throw new Error("当前视频没有可用完整字幕，暂不能总结。");
