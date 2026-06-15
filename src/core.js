@@ -28,6 +28,7 @@
     "gemini-3.1-flash",
     "gemini-3.1-flash-lite",
   ]);
+  const SUMMARY_SEGMENT_PARTS = Symbol("summarySegmentParts");
 
   function normalizeCaptionText(value) {
     return String(value || "")
@@ -988,7 +989,12 @@
   }
 
   function trimSelectedSummarySegments(segments, maxChars) {
-    const selected = segments.map((segment) => ({ ...segment }));
+    const selected = segments.map((segment) =>
+      attachSummarySegmentParts(
+        { ...segment },
+        getSummarySegmentParts(segment).map((part) => ({ ...part })),
+      ),
+    );
 
     while (selected.length > 2 && totalSegmentChars(selected) > maxChars) {
       selected.splice(Math.floor(selected.length / 2), 1);
@@ -1024,23 +1030,31 @@
     const rawMaxMergeGapSeconds = Number(options.maxMergeGapSeconds);
     const maxMergeGapSeconds = Number.isFinite(rawMaxMergeGapSeconds)
       ? Math.max(0, rawMaxMergeGapSeconds)
-      : 0.5;
+      : 8;
     const segments = [];
 
     for (const cue of normalizedSummaryCues(cues)) {
       const source = limitSummarySegmentText(cue.source, maxSegmentChars);
+      const end = cue.end || cue.start;
+      const part = { start: cue.start, end, text: source };
       const previous = segments.at(-1);
       const gap = previous ? cue.start - previous.end : 0;
       const mergedText = previous ? `${previous.text} ${source}`.trim() : source;
       if (previous && gap <= maxMergeGapSeconds && mergedText.length <= maxSegmentChars) {
-        previous.end = Math.max(previous.end, cue.end || cue.start);
+        previous.end = Math.max(previous.end, end);
         previous.text = mergedText;
+        getSummarySegmentParts(previous).push(part);
       } else {
-        segments.push({
-          start: cue.start,
-          end: cue.end || cue.start,
-          text: source,
-        });
+        segments.push(
+          attachSummarySegmentParts(
+            {
+              start: cue.start,
+              end,
+              text: source,
+            },
+            [part],
+          ),
+        );
       }
     }
 
@@ -1075,6 +1089,38 @@
       .map((index) => segments[index]);
 
     return trimSelectedSummarySegments(selected, maxChars);
+  }
+
+  function attachSummarySegmentParts(segment, parts) {
+    Object.defineProperty(segment, SUMMARY_SEGMENT_PARTS, {
+      value: parts,
+      writable: true,
+      enumerable: false,
+      configurable: true,
+    });
+    return segment;
+  }
+
+  function getSummarySegmentParts(segment) {
+    return Array.isArray(segment?.[SUMMARY_SEGMENT_PARTS])
+      ? segment[SUMMARY_SEGMENT_PARTS]
+      : [];
+  }
+
+  function formatSummarySegmentForPrompt(segment) {
+    const parts = getSummarySegmentParts(segment);
+    const partsText = normalizeCaptionText(parts.map((part) => part.text).join(" "));
+    if (parts.length > 1 && partsText === normalizeCaptionText(segment.text)) {
+      return parts
+        .map(
+          (part) =>
+            `[${formatSummaryTimestamp(part.start)}-${formatSummaryTimestamp(part.end)}] ${safeLine(part.text)}`,
+        )
+        .join(" ");
+    }
+    return `[${formatSummaryTimestamp(segment.start)}-${formatSummaryTimestamp(
+      segment.end,
+    )}] ${safeLine(segment.text)}`;
   }
 
   function buildVideoSummaryPrompt(options = {}) {
@@ -1116,9 +1162,7 @@
       lines.push("- None");
     } else {
       segments.forEach((segment) => {
-        lines.push(
-          `- [${formatSummaryTimestamp(segment.start)}-${formatSummaryTimestamp(segment.end)}] ${safeLine(segment.text)}`,
-        );
+        lines.push(`- ${formatSummarySegmentForPrompt(segment)}`);
       });
     }
 
