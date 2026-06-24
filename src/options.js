@@ -45,16 +45,35 @@ const state = {
   displaySaveTimer: 0,
 };
 
+function runtimeErrorMessage(error, fallback = "操作失败") {
+  const message = String(
+    typeof error === "string" ? error : error?.message || "",
+  )
+    .replace(/\s+/g, " ")
+    .trim();
+  if (
+    /extension context invalidated|receiving end does not exist|context invalidated/i
+      .test(message)
+  ) {
+    return "扩展已重新加载，请刷新页面后继续使用。";
+  }
+  return message || fallback;
+}
+
 function sendMessage(message) {
   return new Promise((resolve, reject) => {
-    chrome.runtime.sendMessage(message, (response) => {
-      const lastError = chrome.runtime.lastError;
-      if (lastError) {
-        reject(new Error(lastError.message));
-        return;
-      }
-      resolve(response);
-    });
+    try {
+      chrome.runtime.sendMessage(message, (response) => {
+        const lastError = chrome.runtime.lastError;
+        if (lastError) {
+          reject(new Error(runtimeErrorMessage(lastError, "扩展通信失败")));
+          return;
+        }
+        resolve(response);
+      });
+    } catch (error) {
+      reject(new Error(runtimeErrorMessage(error, "扩展通信失败")));
+    }
   });
 }
 

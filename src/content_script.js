@@ -100,15 +100,24 @@
         reject(new Error("翻译请求超时，请检查 API key、网络或更换模型。"));
       }, timeoutMs);
 
-      chrome.runtime.sendMessage(message, (response) => {
+      function rejectRuntimeError(error) {
         window.clearTimeout(timeoutId);
-        const lastError = chrome.runtime.lastError;
-        if (lastError) {
-          reject(new Error(lastError.message));
-          return;
-        }
-        resolve(response);
-      });
+        reject(new Error(core.runtimeErrorMessage(error, "扩展通信失败")));
+      }
+
+      try {
+        chrome.runtime.sendMessage(message, (response) => {
+          window.clearTimeout(timeoutId);
+          const lastError = chrome.runtime.lastError;
+          if (lastError) {
+            reject(new Error(core.runtimeErrorMessage(lastError, "扩展通信失败")));
+            return;
+          }
+          resolve(response);
+        });
+      } catch (error) {
+        rejectRuntimeError(error);
+      }
     });
   }
 

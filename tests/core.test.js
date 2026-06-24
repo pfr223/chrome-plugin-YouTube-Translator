@@ -222,6 +222,20 @@ test("keeps provider API keys and overlay display settings independently", () =>
   assert.equal(settings.overlayYPercent, 0);
 });
 
+test("maps extension reload runtime errors to a user-facing refresh hint", () => {
+  assert.equal(
+    core.runtimeErrorMessage("Extension context invalidated."),
+    "扩展已重新加载，请刷新页面后继续使用。",
+  );
+  assert.equal(
+    core.runtimeErrorMessage({
+      message: "Could not establish connection. Receiving end does not exist.",
+    }),
+    "扩展已重新加载，请刷新页面后继续使用。",
+  );
+  assert.equal(core.runtimeErrorMessage("", "翻译失败"), "翻译失败");
+});
+
 test("pins overlay width to two thirds of the video frame", () => {
   const css = fs.readFileSync(
     path.join(projectRoot, "src", "content_script.css"),
@@ -1510,6 +1524,7 @@ test("wires video summary integration points into background and content script"
   assert.match(script, /summarizeCurrentVideo/);
   assert.match(script, /seekToSummaryChapter/);
   assert.match(script, /YTCT_SUMMARIZE_VIDEO/);
+  assert.match(script, /core\.runtimeErrorMessage\(lastError/);
   assert.match(css, /\.ytct-summary-panel/);
 });
 
@@ -2170,6 +2185,8 @@ test("wires web page translation 3.0 through manifest, background, popup, and op
   assert.match(popupScript, /webTranslationTargetLanguage/);
   assert.match(popupScript, /webTranslationDisplayMode/);
   assert.match(popupScript, /webTranslationScope/);
+  assert.match(popupScript, /function runtimeErrorMessage/);
+  assert.match(popupScript, /reject\(new Error\(runtimeErrorMessage/);
   assert.match(optionsHtml, /id="webTranslationEnabled"/);
   assert.match(optionsHtml, /id="webTranslationTargetLanguage"/);
   assert.match(optionsHtml, /id="webTranslationDisplayMode"/);
@@ -2177,9 +2194,12 @@ test("wires web page translation 3.0 through manifest, background, popup, and op
   assert.match(optionsHtml, /id="webTranslationSiteRules"/);
   assert.match(optionsScript, /webTranslationEnabled/);
   assert.match(optionsScript, /webTranslationSiteRules/);
+  assert.match(optionsScript, /function runtimeErrorMessage/);
+  assert.match(optionsScript, /reject\(new Error\(runtimeErrorMessage/);
   assert.match(translator, /IntersectionObserver/);
   assert.match(translator, /MutationObserver/);
   assert.match(translator, /function scanRoots\(\)/);
+  assert.match(translator, /core\.runtimeErrorMessage\(lastError/);
   assert.match(translator, /function currentSiteRule\(\)/);
   assert.match(translator, /YTCT_ANALYZE_WEB_PAGE_MEMORY/);
   assert.match(translator, /function takeNextSectionBatch\(/);

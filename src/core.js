@@ -82,6 +82,19 @@
     return normalizeCaptionText(value).replace(/^[\s、，,。；;：:]+/, "");
   }
 
+  function runtimeErrorMessage(error, fallback = "操作失败") {
+    const message = normalizeCaptionText(
+      typeof error === "string" ? error : error?.message || "",
+    );
+    if (
+      /extension context invalidated|receiving end does not exist|context invalidated/i
+        .test(message)
+    ) {
+      return "扩展已重新加载，请刷新页面后继续使用。";
+    }
+    return message || fallback;
+  }
+
   function clampInteger(value, min, max, fallback) {
     const number = Number.parseInt(value, 10);
     if (!Number.isFinite(number)) {
@@ -2759,6 +2772,7 @@
     TRANSLATION_PROMPT_VERSION,
     WEB_TRANSLATION_PROMPT_VERSION,
     normalizeCaptionText,
+    runtimeErrorMessage,
     isProbablyCodeText,
     splitWebPageTextSegments,
     parseUserGlossary,

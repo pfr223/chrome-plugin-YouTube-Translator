@@ -198,15 +198,24 @@
         reject(new Error("网页翻译请求超时，请检查网络或更换模型。"));
       }, timeoutMs);
 
-      chrome.runtime.sendMessage(message, (response) => {
+      function rejectRuntimeError(error) {
         window.clearTimeout(timeoutId);
-        const lastError = chrome.runtime.lastError;
-        if (lastError) {
-          reject(new Error(lastError.message));
-          return;
-        }
-        resolve(response);
-      });
+        reject(new Error(core.runtimeErrorMessage(error, "网页翻译失败")));
+      }
+
+      try {
+        chrome.runtime.sendMessage(message, (response) => {
+          window.clearTimeout(timeoutId);
+          const lastError = chrome.runtime.lastError;
+          if (lastError) {
+            reject(new Error(core.runtimeErrorMessage(lastError, "网页翻译失败")));
+            return;
+          }
+          resolve(response);
+        });
+      } catch (error) {
+        rejectRuntimeError(error);
+      }
     });
   }
 
