@@ -29,6 +29,27 @@ test("detects probable code without skipping natural prose keywords", () => {
   assert.equal(core.isProbablyCodeText("function updatePolicy(state) { return state; }"), true);
 });
 
+test("splits multiline web page text into translatable segments", () => {
+  assert.deepEqual(
+    core.splitWebPageTextSegments(`Do twin primes go on forever?
+
+If you’re looking for a molecular modelling kit, try Snatoms.
+
+▀▀▀
+0:00 What are twin primes?
+3:08 How To Find Prime Numbers
+
+References can be found here: https://ve42.co/TwinPrimesRefs`),
+    [
+      "Do twin primes go on forever?",
+      "If you’re looking for a molecular modelling kit, try Snatoms.",
+      "0:00 What are twin primes?",
+      "3:08 How To Find Prime Numbers",
+      "References can be found here: https://ve42.co/TwinPrimesRefs",
+    ],
+  );
+});
+
 test("builds a context-aware prompt with bounded previous captions", () => {
   const prompt = core.buildTranslationPrompt({
     currentText: "given point of time right so what we do is right we do",
@@ -2022,6 +2043,11 @@ test("web page translation supports YouTube watch descriptions and comments", ()
   assert.match(translator, /"ytd-comment-thread-renderer #content-text"/);
   assert.match(translator, /function isYouTubeWatchPage\(/);
   assert.match(translator, /function isYouTubeTextBlock\(/);
+  assert.match(translator, /function isYouTubeDescriptionBlock\(/);
+  assert.match(translator, /function collectYouTubeDescriptionBlocks\(/);
+  assert.match(translator, /core\.splitWebPageTextSegments/);
+  assert.match(translator, /segmentIndex/);
+  assert.match(translator, /data-ytct-web-segment-index/);
   assert.match(translator, /if \(isYouTubeWatchPage\(\)\)/);
   assert.match(translator, /attributes:\s*true/);
   assert.match(translator, /attributeFilter:\s*\["class", "hidden", "is-expanded", "style"\]/);

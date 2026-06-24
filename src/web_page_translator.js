@@ -39,10 +39,13 @@
     "ytd-watch-metadata",
     "ytd-comments",
   ].join(",");
-  const YOUTUBE_BLOCK_SELECTOR = [
+  const YOUTUBE_DESCRIPTION_BLOCK_SELECTOR = [
     "#description-inline-expander #snippet-text",
     "#description-inline-expander[is-expanded] #expanded yt-attributed-string",
     "ytd-expandable-video-description-body-renderer ytd-text-inline-expander#inline-expander",
+  ].join(",");
+  const YOUTUBE_BLOCK_SELECTOR = [
+    YOUTUBE_DESCRIPTION_BLOCK_SELECTOR,
     "ytd-comment-thread-renderer #content-text",
   ].join(",");
   const SKIP_SELECTOR = [
@@ -101,6 +104,10 @@
 
   function isYouTubeTextBlock(element) {
     return isYouTubeWatchPage() && element.matches(YOUTUBE_BLOCK_SELECTOR);
+  }
+
+  function isYouTubeDescriptionBlock(element) {
+    return isYouTubeWatchPage() && element.matches(YOUTUBE_DESCRIPTION_BLOCK_SELECTOR);
   }
 
   function currentSiteRule() {
@@ -288,6 +295,19 @@
     return terms.slice(0, 24);
   }
 
+  function protectedTermsForText(text) {
+    const terms = [];
+    const seen = new Set();
+    const source = String(text || "");
+    (source.match(/(?:https?:\/\/|www\.)[^\s]+/gi) || []).forEach((url) => {
+      addProtectedTerm(terms, seen, url, "link");
+    });
+    (source.match(/\b\d{1,2}:\d{2}(?::\d{2})?\b/g) || []).forEach((time) => {
+      addProtectedTerm(terms, seen, time, "timestamp");
+    });
+    return terms.slice(0, 12);
+  }
+
   function countWords(text) {
     return core.normalizeCaptionText(text).split(/\s+/).filter(Boolean).length;
   }
@@ -457,6 +477,10 @@
     }
   }
 
+  function rawTextWithLineBreaks(element) {
+    return element.innerText || element.textContent || "";
+  }
+
   function pageContextPayload() {
     return {
       title: document.title,
@@ -484,6 +508,17 @@
         hasNestedTextBlocks(element) ||
         isHighRiskLayout(element)
       ) {
+        continue;
+      }
+      if (isYouTubeDescriptionBlock(element)) {
+        const childDescriptionBlocks = safeQuerySelectorAll(
+          element,
+          YOUTUBE_DESCRIPTION_BLOCK_SELECTOR,
+        ).filter((child) => child !== element && isVisibleElement(child));
+        if (childDescriptionBlocks.length > 0) {
+          continue;
+        }
+        collected.push(...collectYouTubeDescriptionBlocks(element, order));
         continue;
       }
       const text = getTextWithoutTranslations(element);
@@ -523,6 +558,43 @@
       );
     }
     return state.orderedBlocks;
+  }
+
+  function collectYouTubeDescriptionBlocks(element, order) {
+    const segments = core.splitWebPageTextSegments(rawTextWithLineBreaks(element))
+      .filter((text) => shouldTranslateText(text, element));
+    if (segments.length === 0) {
+      return [];
+    }
+
+    const existingHostId = element.dataset.ytctWebBlockId;
+    const hostId = existingHostId || `web-block-${state.blockCounter}`;
+    if (!existingHostId) {
+      state.blockCounter += 1;
+      element.dataset.ytctWebBlockId = hostId;
+    }
+    const rect = element.getBoundingClientRect();
+
+    return segments.map((text, segmentIndex) => {
+      const id = `${hostId}-segment-${segmentIndex}`;
+      const block = state.blocks.get(id) || {
+        id,
+        element,
+        translationElement: null,
+        status: "pending",
+      };
+      resetBlockIfSourceChanged(block, text);
+      block.text = text;
+      block.headingPath = headingPathFor(element);
+      block.protectedTerms = protectedTermsForText(text);
+      block.top = rect.top + window.scrollY;
+      block.left = rect.left + window.scrollX;
+      block.order = order + segmentIndex / 1000;
+      block.segmentIndex = segmentIndex;
+      block.segmentHostId = hostId;
+      state.blocks.set(id, block);
+      return block;
+    });
   }
 
   function enqueueBlock(block) {
@@ -644,6 +716,20 @@
       : "after";
   }
 
+  function translationInsertReference(block) {
+    if (!block?.segmentHostId) {
+      return block.element;
+    }
+    const previousBlock = state.orderedBlocks
+      .filter((item) =>
+        item.segmentHostId === block.segmentHostId &&
+        Number(item.segmentIndex) < Number(block.segmentIndex) &&
+        item.translationElement?.isConnected
+      )
+      .slice(-1)[0];
+    return previousBlock?.translationElement || block.element;
+  }
+
   function syncTranslationTypography(element, sourceElement) {
     const sourceStyle = window.getComputedStyle(sourceElement);
     [
@@ -687,6 +773,11 @@
     element.lang = state.settings.webTranslationTargetLanguage || "zh-CN";
     element.dataset.mode = state.settings.webTranslationDisplayMode || "bilingual";
     element.setAttribute("data-ytct-web-translation", block.id);
+    if (Number.isFinite(Number(block.segmentIndex))) {
+      element.setAttribute("data-ytct-web-segment-index", String(block.segmentIndex));
+    } else {
+      element.removeAttribute("data-ytct-web-segment-index");
+    }
     element.textContent = translation;
     syncTranslationTypography(element, block.element);
 
@@ -694,7 +785,7 @@
       if (translationHostMode(block.element) === "inside") {
         block.element.appendChild(element);
       } else {
-        block.element.insertAdjacentElement("afterend", element);
+        translationInsertReference(block).insertAdjacentElement("afterend", element);
       }
     }
     block.translationElement = element;

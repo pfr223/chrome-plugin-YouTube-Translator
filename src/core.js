@@ -65,6 +65,19 @@
     );
   }
 
+  function isSeparatorOnlyLine(value) {
+    const source = normalizeCaptionText(value);
+    return Boolean(source) && /^[\s▀▄█▔▁─━—\-_=•·]+$/.test(source);
+  }
+
+  function splitWebPageTextSegments(value) {
+    return String(value || "")
+      .replace(/\r\n?/g, "\n")
+      .split(/\n+/)
+      .map(normalizeCaptionText)
+      .filter((line) => line && !isSeparatorOnlyLine(line));
+  }
+
   function cleanTranslationText(value) {
     return normalizeCaptionText(value).replace(/^[\s、，,。；;：:]+/, "");
   }
@@ -2718,6 +2731,7 @@
     WEB_TRANSLATION_PROMPT_VERSION,
     normalizeCaptionText,
     isProbablyCodeText,
+    splitWebPageTextSegments,
     parseUserGlossary,
     createGlossaryVersion,
     createSourceCleanHash,
