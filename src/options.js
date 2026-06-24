@@ -126,7 +126,7 @@ async function loadSettings() {
   form.contextItems.value = settings.contextItems;
   form.customInstructions.value = settings.customInstructions || "";
   form.userGlossary.value = settings.userGlossary || "";
-  form.syncStrategy.value = settings.syncStrategy || "cue";
+  form.syncStrategy.value = settings.syncStrategy || "segment";
   form.sourceDisplayMode.value = settings.sourceDisplayMode || "raw";
   form.webTranslationEnabled.checked = settings.webTranslationEnabled !== false;
   form.webTranslationTargetLanguage.value =

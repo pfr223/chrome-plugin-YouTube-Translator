@@ -1341,17 +1341,38 @@
   }
 
   function displaySourceForCue(cue) {
-    if (state.settings.sourceDisplayMode !== "clean") {
-      return cue.source;
+    const segment = shouldUseSegmentDisplay(cue) ? segmentForCue(cue) : null;
+    if (segment) {
+      return state.settings.sourceDisplayMode === "clean"
+        ? segment.sourceClean
+        : segment.sourceRaw;
     }
-    return core.cleanCaptionSourceText(cue.source, {
-      captionKind: state.captionKind,
-      restoreFinalPunctuation: false,
-    });
+    if (state.settings.sourceDisplayMode === "clean") {
+      return core.cleanCaptionSourceText(cue.source, {
+        captionKind: state.captionKind,
+        restoreFinalPunctuation: false,
+      });
+    }
+    return cue.source;
   }
 
   function segmentForCue(cue) {
     return state.segments.find((segment) => segment.cueIds.includes(cue.id)) || null;
+  }
+
+  function shouldUseSegmentDisplay(cue) {
+    const segment = segmentForCue(cue);
+    if (!segment) {
+      return false;
+    }
+    if (state.settings.syncStrategy === "segment") {
+      return true;
+    }
+    return (
+      state.settings.syncStrategy === "cue" &&
+      state.captionKind === "asr" &&
+      segment.cueIds.length > 3
+    );
   }
 
   function fullTranslationForCue(cue) {
@@ -1367,7 +1388,7 @@
   function translationForCue(cue) {
     const cueTranslation = core.normalizeCaptionText(cue.translation);
     const fullTranslation = fullTranslationForCue(cue);
-    if (state.settings.syncStrategy === "segment" && fullTranslation) {
+    if (shouldUseSegmentDisplay(cue) && fullTranslation) {
       return fullTranslation;
     }
     if (

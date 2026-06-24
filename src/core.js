@@ -13,7 +13,7 @@
     customInstructions: "",
     userGlossary: "",
     sourceDisplayMode: "raw",
-    syncStrategy: "cue",
+    syncStrategy: "segment",
     webTranslationEnabled: true,
     webTranslationTargetLanguage: "zh-CN",
     webTranslationDisplayMode: "bilingual",
@@ -156,9 +156,11 @@
         typeof value.userGlossary === "string" ? value.userGlossary.trim() : "",
       sourceDisplayMode: value.sourceDisplayMode === "clean" ? "clean" : "raw",
       syncStrategy:
-        value.syncStrategy === "segment" || value.syncStrategy === "hybrid"
+        value.syncStrategy === "cue" ||
+        value.syncStrategy === "segment" ||
+        value.syncStrategy === "hybrid"
           ? value.syncStrategy
-          : "cue",
+          : DEFAULT_SETTINGS.syncStrategy,
       webTranslationEnabled: value.webTranslationEnabled !== false,
       webTranslationTargetLanguage:
         normalizeCaptionText(value.webTranslationTargetLanguage) ||
@@ -1132,7 +1134,13 @@
   }
 
   function buildTranslationSegmentsFromCues(cues, options = {}) {
-    const maxCuesPerSegment = clampInteger(options.maxCuesPerSegment, 1, 10, 5);
+    const isAsrCaption = normalizeCaptionText(options.captionKind) === "asr";
+    const maxCuesPerSegment = clampInteger(
+      options.maxCuesPerSegment,
+      1,
+      isAsrCaption ? 30 : 10,
+      isAsrCaption ? 18 : 5,
+    );
     const maxWordsPerSegment = clampInteger(options.maxWordsPerSegment, 4, 80, 45);
     const maxSegmentChars = clampInteger(options.maxSegmentChars, 80, 600, 220);
     const maxDurationSeconds = Number.isFinite(Number(options.maxDurationSeconds))

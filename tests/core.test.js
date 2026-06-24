@@ -121,7 +121,7 @@ test("normalizes settings with provider-specific defaults and safe bounds", () =
     customInstructions: "",
     userGlossary: "",
     sourceDisplayMode: "raw",
-    syncStrategy: "cue",
+    syncStrategy: "segment",
     webTranslationEnabled: true,
     webTranslationTargetLanguage: "zh-CN",
     webTranslationDisplayMode: "bilingual",
@@ -166,9 +166,13 @@ test("normalizes settings with provider-specific defaults and safe bounds", () =
     "segment",
   );
   assert.equal(
+    core.normalizeSettings({ syncStrategy: "cue" }).syncStrategy,
+    "cue",
+  );
+  assert.equal(
     core.normalizeSettings({ sourceDisplayMode: "unknown", syncStrategy: "bad" })
       .syncStrategy,
-    "cue",
+    "segment",
   );
   assert.equal(
     core.normalizeSettings({ webTranslationEnabled: false }).webTranslationEnabled,
@@ -393,6 +397,29 @@ test("builds sourceClean for ASR cues while preserving sourceRaw", () => {
     segments[0].cues.map((cue) => cue.sourceClean),
     ["we use Q-learning", "and epsilon-greedy in MDP."],
   );
+});
+
+test("keeps short ASR word cues together until a sentence boundary", () => {
+  const words =
+    "I also appreciated the exposure to experts from different AI ecosystem.".split(
+      " ",
+    );
+  const segments = core.buildTranslationSegmentsFromCues(
+    words.map((word, index) => ({
+      id: `cue-${index}`,
+      start: index * 0.35,
+      end: index * 0.35 + 0.34,
+      source: word,
+    })),
+    { captionKind: "asr" },
+  );
+
+  assert.equal(segments.length, 1);
+  assert.equal(
+    segments[0].sourceRaw,
+    "I also appreciated the exposure to experts from different AI ecosystem.",
+  );
+  assert.equal(segments[0].cueIds.length, words.length);
 });
 
 test("keeps manual captions on light source cleaning", () => {
@@ -1518,8 +1545,11 @@ test("content script supports source display and sync strategies", () => {
 
   assert.match(script, /segmentTranslations/);
   assert.match(script, /function displaySourceForCue/);
+  assert.match(script, /function shouldUseSegmentDisplay/);
   assert.match(script, /sourceDisplayMode/);
   assert.match(script, /syncStrategy/);
+  assert.match(script, /state\.captionKind === "asr"/);
+  assert.match(script, /segment\.sourceRaw/);
   assert.match(script, /完整句/);
 });
 
