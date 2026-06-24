@@ -5,10 +5,15 @@ const SETTINGS_KEY = "ytContextTranslatorSettings";
 const VIDEO_MEMORY_CACHE_KEY = "ytContextTranslatorVideoMemoryCache";
 const translationCache = new Map();
 const summaryCache = new Map();
+const webPageTranslationCache = new Map();
+const webPageMemoryCache = new Map();
 const MAX_CACHE_ITEMS = 300;
 const MAX_SUMMARY_CACHE_ITEMS = 40;
+const MAX_WEB_PAGE_CACHE_ITEMS = 500;
+const MAX_WEB_PAGE_MEMORY_CACHE_ITEMS = 80;
 const API_TIMEOUT_MS = 18000;
 const SUMMARY_API_TIMEOUT_MS = 45000;
+const WEB_PAGE_API_TIMEOUT_MS = 45000;
 const MAX_VIDEO_MEMORY_CHUNKS = 8;
 
 function storageGet(keys) {
@@ -74,6 +79,11 @@ function publicSettings(settings) {
     userGlossary: settings.userGlossary,
     sourceDisplayMode: settings.sourceDisplayMode,
     syncStrategy: settings.syncStrategy,
+    webTranslationEnabled: settings.webTranslationEnabled,
+    webTranslationTargetLanguage: settings.webTranslationTargetLanguage,
+    webTranslationDisplayMode: settings.webTranslationDisplayMode,
+    webTranslationScope: settings.webTranslationScope,
+    webTranslationSiteRules: settings.webTranslationSiteRules,
     overlayOpacityPercent: settings.overlayOpacityPercent,
     overlayFontScalePercent: settings.overlayFontScalePercent,
     overlayXPercent: settings.overlayXPercent,
@@ -121,6 +131,48 @@ function rememberSummaryCache(key, value) {
   while (summaryCache.size > MAX_SUMMARY_CACHE_ITEMS) {
     summaryCache.delete(summaryCache.keys().next().value);
   }
+}
+
+function rememberWebPageCache(key, value) {
+  if (webPageTranslationCache.has(key)) {
+    webPageTranslationCache.delete(key);
+  }
+  webPageTranslationCache.set(key, value);
+  while (webPageTranslationCache.size > MAX_WEB_PAGE_CACHE_ITEMS) {
+    webPageTranslationCache.delete(webPageTranslationCache.keys().next().value);
+  }
+}
+
+function rememberWebPageMemoryCache(key, value) {
+  if (webPageMemoryCache.has(key)) {
+    webPageMemoryCache.delete(key);
+  }
+  webPageMemoryCache.set(key, value);
+  while (webPageMemoryCache.size > MAX_WEB_PAGE_MEMORY_CACHE_ITEMS) {
+    webPageMemoryCache.delete(webPageMemoryCache.keys().next().value);
+  }
+}
+
+function webPageMemoryCacheKey({ pageContext, model, glossaryVersion, blocks }) {
+  const sourceHash = core.createSourceCleanHash(
+    (Array.isArray(blocks) ? blocks : [])
+      .slice(0, 80)
+      .map((block) => block.text || "")
+      .join("\n"),
+  );
+  return [
+    core.createWebPageTranslationCacheKey({
+      provider: "",
+      model,
+      pageUrl: pageContext?.url || "",
+      sourceLanguage: pageContext?.language || "auto",
+      targetLanguage: "",
+      promptVersion: `${core.WEB_TRANSLATION_PROMPT_VERSION}:memory`,
+      glossaryVersion,
+      sourceTextHash: sourceHash,
+      headingPath: [pageContext?.title || ""],
+    }),
+  ].join("::");
 }
 
 async function readResponseText(provider, response) {
@@ -388,6 +440,287 @@ async function fetchBatchTranslation(payload) {
   };
 }
 
+async function fetchWebPagePromptText(settings, prompt, maxOutputTokens) {
+  const { url, requestOptions } = buildAuthorizedRequest(
+    settings,
+    prompt,
+    maxOutputTokens,
+  );
+  const response = await fetchWithTimeout(
+    url,
+    requestOptions,
+    WEB_PAGE_API_TIMEOUT_MS,
+  );
+  if (!response.ok) {
+    const message = await response.text();
+    throw new Error(`API 请求失败：${response.status} ${message.slice(0, 240)}`);
+  }
+  return readResponseText(settings.provider, response);
+}
+
+function normalizeWebPagePayloadBlock(block) {
+  return {
+    id: core.normalizeCaptionText(block?.id),
+    text: core.normalizeCaptionText(block?.text),
+    tagName: core.normalizeCaptionText(block?.tagName || "block"),
+    role: core.normalizeCaptionText(block?.role || ""),
+    headingPath: (Array.isArray(block?.headingPath) ? block.headingPath : [])
+      .map(core.normalizeCaptionText)
+      .filter(Boolean),
+    protectedTerms: core.normalizeWebPageProtectedTerms(
+      block?.protectedTerms || block?.protected_terms,
+    ),
+  };
+}
+
+async function fetchWebPageTranslationBatch(payload) {
+  const settings = await getSettings();
+  if (!settings.enabled || !settings.webTranslationEnabled) {
+    return { skipped: true, reason: "disabled", translations: [] };
+  }
+  if (!core.getApiKeyForProvider(settings)) {
+    throw new Error("请先在扩展设置中填写 API key。");
+  }
+
+  const model = core.getModelForProvider(settings);
+  const userGlossary = core.parseUserGlossary(settings.userGlossary);
+  const glossaryVersion = core.createGlossaryVersion(userGlossary);
+  const pageContext =
+    payload.pageContext && typeof payload.pageContext === "object"
+      ? payload.pageContext
+      : {};
+  const pageMemory =
+    payload.pageMemory && typeof payload.pageMemory === "object"
+      ? payload.pageMemory
+      : {};
+  const sourceLanguage =
+    payload.sourceLanguage || pageContext.language || "auto";
+  const targetLanguage =
+    payload.targetLanguage ||
+    settings.webTranslationTargetLanguage ||
+    "zh-CN";
+  const blocks = (Array.isArray(payload.blocks) ? payload.blocks : [])
+    .map(normalizeWebPagePayloadBlock)
+    .filter((block) => block.id && block.text);
+  const translations = [];
+  const pending = [];
+
+  for (const block of blocks) {
+    const cacheKey = core.createWebPageTranslationCacheKey({
+      provider: settings.provider,
+      model,
+      pageUrl: pageContext.url || payload.pageUrl || "",
+      sourceLanguage,
+      targetLanguage,
+      promptVersion: core.WEB_TRANSLATION_PROMPT_VERSION,
+      glossaryVersion,
+      sourceText: block.text,
+      headingPath: block.headingPath,
+      protectedTerms: block.protectedTerms,
+    });
+    if (webPageTranslationCache.has(cacheKey)) {
+      const cachedTranslation = webPageTranslationCache.get(cacheKey).translation;
+      const cachedValidation = core.validateWebPageTranslationResult({
+        blocks: [block],
+        translations: { [block.id]: cachedTranslation },
+      });
+      if (cachedValidation.ok) {
+        translations.push({ id: block.id, translation: cachedTranslation });
+      } else {
+        pending.push({ ...block, cacheKey });
+      }
+    } else {
+      pending.push({ ...block, cacheKey });
+    }
+  }
+
+  if (pending.length === 0) {
+    return {
+      translations,
+      glossary: [],
+      provider: settings.provider,
+      model,
+      cached: true,
+    };
+  }
+
+  const prompt = core.buildWebPageTranslationPrompt({
+    blocks: pending,
+    nonOutputContextBefore: payload.nonOutputContextBefore || [],
+    nonOutputContextAfter: payload.nonOutputContextAfter || [],
+    pageContext,
+    pageMemory,
+    customInstructions: settings.customInstructions,
+    userGlossary,
+    targetLanguage,
+  });
+  const responseText = await fetchWebPagePromptText(
+    settings,
+    prompt,
+    Math.min(8192, 512 + pending.length * 260),
+  );
+  const parsed = core.parseWebPageTranslationResponse(responseText);
+  const pageGlossary = Array.isArray(pageMemory.glossary)
+    ? pageMemory.glossary
+    : [];
+  const userGlossarySources = new Set(
+    userGlossary.map((item) => item.source.toLowerCase()),
+  );
+  const reviewGlossary = userGlossary.concat(
+    pageGlossary.filter(
+      (item) =>
+        !userGlossarySources.has(
+          core.normalizeCaptionText(item.source).toLowerCase(),
+        ),
+    ),
+  );
+  const translationMap = core.applyGlossaryConsistency({
+    cueTranslations: parsed.translations,
+    cueSources: pending.reduce((result, block) => {
+      result[block.id] = block.text;
+      return result;
+    }, {}),
+    glossary: reviewGlossary,
+  });
+  const validation = core.validateWebPageTranslationResult({
+    blocks: pending,
+    translations: translationMap,
+  });
+  let finalTranslationMap = validation.validTranslations;
+  let resultGlossary = parsed.glossary || [];
+
+  if (validation.retryIds.length > 0) {
+    const retryIds = new Set(validation.retryIds);
+    const retryBlocks = pending.filter((block) => retryIds.has(block.id));
+    try {
+      const repairPrompt = core.buildWebPageRepairPrompt({
+        blocks: retryBlocks,
+        pageContext,
+        pageMemory,
+        customInstructions: settings.customInstructions,
+        userGlossary,
+        targetLanguage,
+        reason: validation.reason,
+      });
+      const repairText = await fetchWebPagePromptText(
+        settings,
+        repairPrompt,
+        Math.min(4096, 512 + retryBlocks.length * 260),
+      );
+      const repairParsed = core.parseWebPageTranslationResponse(repairText);
+      const repairMap = core.applyGlossaryConsistency({
+        cueTranslations: repairParsed.translations,
+        cueSources: retryBlocks.reduce((result, block) => {
+          result[block.id] = block.text;
+          return result;
+        }, {}),
+        glossary: reviewGlossary,
+      });
+      const repairValidation = core.validateWebPageTranslationResult({
+        blocks: retryBlocks,
+        translations: repairMap,
+      });
+      finalTranslationMap = {
+        ...finalTranslationMap,
+        ...repairValidation.validTranslations,
+      };
+      resultGlossary = resultGlossary.concat(repairParsed.glossary || []);
+    } catch (_error) {
+      // Keep the valid first-pass translations and leave failed blocks pending.
+    }
+  }
+
+  for (const block of pending) {
+    const translation = core.normalizeCaptionText(finalTranslationMap[block.id]);
+    if (!translation) {
+      continue;
+    }
+    const result = {
+      translation,
+      provider: settings.provider,
+      model,
+    };
+    rememberWebPageCache(block.cacheKey, result);
+    translations.push({ id: block.id, translation });
+  }
+
+  return {
+    translations,
+    glossary: resultGlossary,
+    provider: settings.provider,
+    model,
+    cached: false,
+    repaired: validation.retryIds.length > 0,
+  };
+}
+
+async function fetchWebPageMemory(payload) {
+  const settings = await getSettings();
+  const emptyMemory = {
+    summary: "",
+    domain: "",
+    styleGuide: "",
+    glossary: [],
+    entities: [],
+  };
+  if (!settings.enabled || !settings.webTranslationEnabled) {
+    return { skipped: true, reason: "disabled", pageMemory: emptyMemory };
+  }
+  if (!core.getApiKeyForProvider(settings)) {
+    return { skipped: true, reason: "missing-api-key", pageMemory: emptyMemory };
+  }
+
+  const model = core.getModelForProvider(settings);
+  const userGlossary = core.parseUserGlossary(settings.userGlossary);
+  const glossaryVersion = core.createGlossaryVersion(userGlossary);
+  const pageContext =
+    payload.pageContext && typeof payload.pageContext === "object"
+      ? payload.pageContext
+      : {};
+  const blocks = (Array.isArray(payload.blocks) ? payload.blocks : [])
+    .map(normalizeWebPagePayloadBlock)
+    .filter((block) => block.id && block.text)
+    .slice(0, 80);
+  if (blocks.length === 0) {
+    return { pageMemory: emptyMemory, provider: settings.provider, model };
+  }
+
+  const cacheKey = webPageMemoryCacheKey({
+    pageContext,
+    model,
+    glossaryVersion,
+    blocks,
+  });
+  if (webPageMemoryCache.has(cacheKey)) {
+    return {
+      pageMemory: webPageMemoryCache.get(cacheKey),
+      provider: settings.provider,
+      model,
+      cached: true,
+    };
+  }
+
+  const prompt = core.buildWebPageMemoryPrompt({
+    blocks,
+    pageContext,
+    customInstructions: settings.customInstructions,
+    userGlossary,
+  });
+  const responseText = await fetchWebPagePromptText(
+    settings,
+    prompt,
+    Math.min(8192, 1200 + blocks.length * 120),
+  );
+  const pageMemory = core.parseWebMemoryResponse(responseText);
+  rememberWebPageMemoryCache(cacheKey, pageMemory);
+  return {
+    pageMemory,
+    provider: settings.provider,
+    model,
+    cached: false,
+  };
+}
+
 async function fetchVideoMemory(payload) {
   const settings = await getSettings();
   if (!settings.enabled) {
@@ -575,6 +908,133 @@ async function fetchVideoSummary(payload) {
   return result;
 }
 
+function isInjectableWebPageUrl(value) {
+  try {
+    const url = new URL(value || "");
+    if (url.protocol !== "http:" && url.protocol !== "https:") {
+      return false;
+    }
+    if (/\.?youtube\.com$/i.test(url.hostname)) {
+      return isYouTubeWatchUrl(url);
+    }
+    return url.hostname !== "youtu.be";
+  } catch (_error) {
+    return false;
+  }
+}
+
+function isYouTubeWatchUrl(url) {
+  return /\.?youtube\.com$/i.test(url.hostname) && url.pathname === "/watch";
+}
+
+function queryActiveTab() {
+  return new Promise((resolve, reject) => {
+    chrome.tabs.query({ active: true, currentWindow: true }, (tabs) => {
+      const lastError = chrome.runtime.lastError;
+      if (lastError) {
+        reject(new Error(lastError.message));
+        return;
+      }
+      resolve(tabs?.[0] || null);
+    });
+  });
+}
+
+function insertWebPageTranslatorCss(tabId) {
+  return new Promise((resolve, reject) => {
+    chrome.scripting.insertCSS(
+      {
+        target: { tabId },
+        files: ["src/web_page_translator.css"],
+      },
+      () => {
+        const lastError = chrome.runtime.lastError;
+        if (lastError) {
+          reject(new Error(lastError.message));
+          return;
+        }
+        resolve();
+      },
+    );
+  });
+}
+
+function executeWebPageTranslatorScripts(tabId) {
+  return new Promise((resolve, reject) => {
+    chrome.scripting.executeScript(
+      {
+        target: { tabId },
+        files: ["src/core.js", "src/web_page_translator.js"],
+      },
+      () => {
+        const lastError = chrome.runtime.lastError;
+        if (lastError) {
+          reject(new Error(lastError.message));
+          return;
+        }
+        resolve();
+      },
+    );
+  });
+}
+
+function sendTabMessage(tabId, message) {
+  return new Promise((resolve, reject) => {
+    chrome.tabs.sendMessage(tabId, message, (response) => {
+      const lastError = chrome.runtime.lastError;
+      if (lastError) {
+        reject(new Error(lastError.message));
+        return;
+      }
+      resolve(response);
+    });
+  });
+}
+
+async function startWebPageTranslation() {
+  const tab = await queryActiveTab();
+  if (!tab?.id || !isInjectableWebPageUrl(tab.url)) {
+    throw new Error("当前页面不支持网页翻译。请在普通 http/https 网页中使用。");
+  }
+  const settings = await getSettings();
+  if (!settings.enabled || !settings.webTranslationEnabled) {
+    return { skipped: true, reason: "disabled" };
+  }
+  if (!core.getApiKeyForProvider(settings)) {
+    throw new Error("请先在扩展设置中填写 API key。");
+  }
+
+  await insertWebPageTranslatorCss(tab.id);
+  await executeWebPageTranslatorScripts(tab.id);
+  const response = await sendTabMessage(tab.id, {
+    type: "YTCT_WEB_TRANSLATE_START",
+    settings: publicSettings(settings),
+  });
+  if (!response?.ok) {
+    throw new Error(response?.error || "网页翻译启动失败");
+  }
+  return {
+    tabId: tab.id,
+    url: tab.url,
+    started: true,
+  };
+}
+
+async function clearWebPageTranslation() {
+  const tab = await queryActiveTab();
+  if (!tab?.id || !isInjectableWebPageUrl(tab.url)) {
+    return { skipped: true, reason: "unsupported-page" };
+  }
+  try {
+    const response = await sendTabMessage(tab.id, {
+      type: "YTCT_WEB_TRANSLATE_CLEAR",
+    });
+    return response?.ok ? { cleared: true } : { skipped: true, reason: "not-active" };
+  } catch (_error) {
+    return { skipped: true, reason: "not-active" };
+  }
+}
+
 async function saveSettings(nextSettings) {
   const previous = await getSettings();
   const incoming = { ...(nextSettings || {}) };
@@ -633,6 +1093,34 @@ chrome.runtime.onMessage.addListener((message, _sender, sendResponse) => {
 
   if (message.type === "YTCT_TRANSLATE_BATCH") {
     fetchBatchTranslation(message.payload || {})
+      .then((result) => sendResponse({ ok: true, result }))
+      .catch((error) => sendResponse({ ok: false, error: error.message }));
+    return true;
+  }
+
+  if (message.type === "YTCT_TRANSLATE_WEB_PAGE_BATCH") {
+    fetchWebPageTranslationBatch(message.payload || {})
+      .then((result) => sendResponse({ ok: true, result }))
+      .catch((error) => sendResponse({ ok: false, error: error.message }));
+    return true;
+  }
+
+  if (message.type === "YTCT_ANALYZE_WEB_PAGE_MEMORY") {
+    fetchWebPageMemory(message.payload || {})
+      .then((result) => sendResponse({ ok: true, result }))
+      .catch((error) => sendResponse({ ok: false, error: error.message }));
+    return true;
+  }
+
+  if (message.type === "YTCT_START_WEB_PAGE_TRANSLATION") {
+    startWebPageTranslation()
+      .then((result) => sendResponse({ ok: true, result }))
+      .catch((error) => sendResponse({ ok: false, error: error.message }));
+    return true;
+  }
+
+  if (message.type === "YTCT_CLEAR_WEB_PAGE_TRANSLATION") {
+    clearWebPageTranslation()
       .then((result) => sendResponse({ ok: true, result }))
       .catch((error) => sendResponse({ ok: false, error: error.message }));
     return true;

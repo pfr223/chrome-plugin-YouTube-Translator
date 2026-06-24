@@ -14,6 +14,21 @@ test("normalizes caption text without changing meaningful punctuation", () => {
   assert.equal(core.normalizeCaptionText("Q(a1) = 0.33"), "Q(a1) = 0.33");
 });
 
+test("detects probable code without skipping natural prose keywords", () => {
+  assert.equal(
+    core.isProbablyCodeText(
+      "When you cannot write the rule, hand the search to the gradient and let examples shape the behavior.",
+    ),
+    false,
+  );
+  assert.equal(
+    core.isProbablyCodeText("The class of models can return better answers over time."),
+    false,
+  );
+  assert.equal(core.isProbablyCodeText("let value = computeReward(state);"), true);
+  assert.equal(core.isProbablyCodeText("function updatePolicy(state) { return state; }"), true);
+});
+
 test("builds a context-aware prompt with bounded previous captions", () => {
   const prompt = core.buildTranslationPrompt({
     currentText: "given point of time right so what we do is right we do",
@@ -86,6 +101,11 @@ test("normalizes settings with provider-specific defaults and safe bounds", () =
     userGlossary: "",
     sourceDisplayMode: "raw",
     syncStrategy: "cue",
+    webTranslationEnabled: true,
+    webTranslationTargetLanguage: "zh-CN",
+    webTranslationDisplayMode: "bilingual",
+    webTranslationScope: "page",
+    webTranslationSiteRules: "",
     overlayOpacityPercent: 78,
     overlayFontScalePercent: 100,
     overlayXPercent: 50,
@@ -128,6 +148,28 @@ test("normalizes settings with provider-specific defaults and safe bounds", () =
     core.normalizeSettings({ sourceDisplayMode: "unknown", syncStrategy: "bad" })
       .syncStrategy,
     "cue",
+  );
+  assert.equal(
+    core.normalizeSettings({ webTranslationEnabled: false }).webTranslationEnabled,
+    false,
+  );
+  assert.equal(
+    core.normalizeSettings({ webTranslationTargetLanguage: " ja " })
+      .webTranslationTargetLanguage,
+    "ja",
+  );
+  assert.equal(
+    core.normalizeSettings({ webTranslationDisplayMode: "translation" })
+      .webTranslationDisplayMode,
+    "translation",
+  );
+  assert.equal(
+    core.normalizeSettings({ webTranslationScope: "page" }).webTranslationScope,
+    "page",
+  );
+  assert.equal(
+    core.normalizeSettings({ webTranslationSiteRules: "[]" }).webTranslationSiteRules,
+    "[]",
   );
 });
 
@@ -1122,6 +1164,33 @@ test("parses visible YouTube transcript panel rows into complete cues", () => {
   ]);
 });
 
+test("does not keep a trailing music transcript cue active until video end", () => {
+  const cues = core.parseTranscriptDomRows(
+    [
+      { timestamp: "16:58", text: "now let us look at policy iteration" },
+      { timestamp: "17:02", text: "[Music]" },
+    ],
+    1280,
+  );
+
+  assert.equal(cues.at(-1).source, "[Music]");
+  assert.equal(cues.at(-1).end, 1027);
+  assert.equal(core.findCueAtTime(cues, 1080), null);
+  assert.equal(core.isNonSpeechCaptionText("[Music]"), true);
+  assert.equal(core.isNonSpeechCaptionText("The music changes the policy."), false);
+});
+
+test("content script skips non-speech cues and recovers from incomplete timelines", () => {
+  const script = fs.readFileSync(
+    path.join(projectRoot, "src", "content_script.js"),
+    "utf8",
+  );
+
+  assert.match(script, /core\.isNonSpeechCaptionText\(cue\.source\)/);
+  assert.match(script, /core\.isNonSpeechCaptionText\(currentText\)/);
+  assert.match(script, /switchToFallback\("timeline-gap"\)/);
+});
+
 test("retries transcript timeline when fallback can see transcript rows", () => {
   assert.equal(
     core.shouldRetryTranscriptDomTimeline({
@@ -1511,4 +1580,545 @@ test("options page exposes source display and sync strategy settings", () => {
   assert.match(script, /syncStrategy:\s*document\.querySelector\("#syncStrategy"\)/);
   assert.match(script, /sourceDisplayMode:\s*form\.sourceDisplayMode\.value/);
   assert.match(script, /syncStrategy:\s*form\.syncStrategy\.value/);
+});
+
+test("builds and parses web page translation prompts", () => {
+  const prompt = core.buildWebPageTranslationPrompt({
+    blocks: [
+      {
+        id: "web-block-0",
+        tagName: "h1",
+        text: "Gradient Handoff",
+        headingPath: ["Gradient Handoff"],
+      },
+      {
+        id: "web-block-1",
+        tagName: "p",
+        text: "When you cannot write the rule, describe the goal and let the gradient find it.",
+        headingPath: ["Gradient Handoff"],
+      },
+    ],
+    pageContext: {
+      title: "Gradient Handoff",
+      url: "https://example.com/article",
+      language: "en",
+    },
+    nonOutputContextBefore: [
+      { id: "before-0", text: "A note about intelligence.", tagName: "p" },
+    ],
+    nonOutputContextAfter: [
+      { id: "after-0", text: "Vision, language, and reasoning examples follow.", tagName: "p" },
+    ],
+    pageMemory: {
+      glossary: [{ source: "gradient descent", translation: "梯度下降" }],
+    },
+    userGlossary: [{ source: "gradient", target: "梯度", locked: true }],
+    customInstructions: "保持技术术语一致。",
+    targetLanguage: "zh-CN",
+  });
+
+  assert.match(prompt, /translate ordinary web page text/i);
+  assert.match(prompt, /preserve the original DOM structure/i);
+  assert.match(prompt, /output_blocks/);
+  assert.match(prompt, /non_output_context_before/);
+  assert.match(prompt, /non_output_context_after/);
+  assert.match(prompt, /Gradient Handoff/);
+  assert.match(prompt, /gradient descent/);
+  assert.match(prompt, /保持技术术语一致/);
+
+  assert.deepEqual(
+    core.parseWebPageTranslationResponse(`{
+      "translations": [
+        {"id": "web-block-0", "translation": "梯度传递"},
+        {"id": "web-block-1", "translation": "当你写不出规则时，就描述目标，让梯度找到它。"}
+      ],
+      "glossary": [{"source": "gradient descent", "translation": "梯度下降"}]
+    }`),
+    {
+      translations: {
+        "web-block-0": "梯度传递",
+        "web-block-1": "当你写不出规则时，就描述目标，让梯度找到它。",
+      },
+      glossary: [{ source: "gradient descent", translation: "梯度下降" }],
+    },
+  );
+});
+
+test("builds and parses web page memory prompts", () => {
+  const prompt = core.buildWebPageMemoryPrompt({
+    pageContext: {
+      title: "Gradient Handoff",
+      url: "https://example.com/gradient-handoff",
+      language: "en",
+    },
+    blocks: [
+      {
+        id: "web-block-0",
+        tagName: "h1",
+        text: "Gradient Handoff",
+        headingPath: ["Gradient Handoff"],
+      },
+      {
+        id: "web-block-1",
+        tagName: "p",
+        text: "A deep visual walk from a virus to attention inside Claude.",
+        headingPath: ["Gradient Handoff"],
+      },
+    ],
+    userGlossary: [{ source: "attention", target: "attention", locked: true }],
+    customInstructions: "AI 术语保持一致。",
+  });
+
+  assert.match(prompt, /WebMemory map step/i);
+  assert.match(prompt, /stable facts that help translate this web page/i);
+  assert.match(prompt, /Gradient Handoff/);
+  assert.match(prompt, /user_glossary/);
+  assert.match(prompt, /AI 术语保持一致/);
+
+  assert.deepEqual(
+    core.parseWebMemoryResponse(`{
+      "summary": "An AI mental-model article about gradient handoff.",
+      "domain": "AI education",
+      "styleGuide": "Use concise explanatory Chinese.",
+      "glossary": [{"source": "gradient handoff", "translation": "梯度移交"}],
+      "entities": ["Claude"]
+    }`),
+    {
+      summary: "An AI mental-model article about gradient handoff.",
+      domain: "AI education",
+      styleGuide: "Use concise explanatory Chinese.",
+      glossary: [{ source: "gradient handoff", translation: "梯度移交" }],
+      entities: ["Claude"],
+    },
+  );
+});
+
+test("uses section context in web page translation prompts", () => {
+  const prompt = core.buildWebPageTranslationPrompt({
+    blocks: [
+      {
+        id: "web-block-1",
+        tagName: "p",
+        text: "Policy iteration alternates evaluation and improvement.",
+        headingPath: ["Dynamic Programming", "Policy Iteration"],
+      },
+    ],
+    pageMemory: {
+      summary: "A reinforcement learning lecture note.",
+      domain: "reinforcement learning",
+      styleGuide: "Keep equations and RL terms concise.",
+      glossary: [{ source: "policy iteration", translation: "policy iteration（策略迭代）" }],
+      entities: ["Bellman equation"],
+    },
+  });
+
+  assert.match(prompt, /Translate each output block as part of its surrounding section/i);
+  assert.match(prompt, /styleGuide/);
+  assert.match(prompt, /reinforcement learning/);
+  assert.match(prompt, /Policy Iteration/);
+});
+
+test("protects inline code links and formulas in web page prompts", () => {
+  const prompt = core.buildWebPageTranslationPrompt({
+    blocks: [
+      {
+        id: "web-block-1",
+        tagName: "p",
+        text: "The update uses Q(s,a) and links to the Bellman proof.",
+        headingPath: ["Dynamic Programming"],
+        protectedTerms: [
+          { text: "Q(s,a)", kind: "code" },
+          { text: "argmax_a Q(s,a)", kind: "math" },
+          { text: "https://example.com/bellman", kind: "link" },
+        ],
+      },
+    ],
+  });
+
+  assert.match(prompt, /protected_terms/);
+  assert.match(prompt, /Do not translate, rewrite, or drop protected_terms/i);
+  assert.match(prompt, /Q\(s,a\)/);
+  assert.match(prompt, /argmax_a Q\(s,a\)/);
+  assert.match(prompt, /https:\/\/example\.com\/bellman/);
+});
+
+test("validates web page translations for missing and copied outputs", () => {
+  const validation = core.validateWebPageTranslationResult({
+    blocks: [
+      {
+        id: "web-block-0",
+        text: "Gradient handoff starts here.",
+        protectedTerms: [{ text: "Q(s,a)", kind: "code" }],
+      },
+      { id: "web-block-1", text: "Attention routes context." },
+      { id: "web-block-2", text: "The policy changes." },
+    ],
+    translations: {
+      "web-block-0": "梯度移交从这里开始。",
+      "web-block-1": "Attention routes context.",
+    },
+  });
+
+  assert.equal(validation.ok, false);
+  assert.deepEqual(validation.retryIds, ["web-block-0", "web-block-1", "web-block-2"]);
+  assert.deepEqual(validation.validTranslations, {});
+  assert.match(validation.reason, /missing-protected/);
+  assert.match(validation.reason, /copied-source/);
+  assert.match(validation.reason, /missing/);
+});
+
+test("builds focused repair prompts for failed web page translation blocks", () => {
+  const prompt = core.buildWebPageRepairPrompt({
+    blocks: [
+      {
+        id: "web-block-2",
+        text: "The policy changes according to Q(s,a).",
+        tagName: "p",
+        protectedTerms: [{ text: "Q(s,a)", kind: "code" }],
+      },
+    ],
+    pageContext: { title: "Policy Iteration" },
+    pageMemory: { glossary: [{ source: "policy", translation: "policy" }] },
+    reason: "missing",
+  });
+
+  assert.match(prompt, /Repair missing or invalid web page translations/i);
+  assert.match(prompt, /web-block-2/);
+  assert.match(prompt, /The policy changes/);
+  assert.match(prompt, /protected_terms/);
+  assert.match(prompt, /Q\(s,a\)/);
+  assert.match(prompt, /policy/);
+  assert.match(prompt, /Return only JSON/);
+});
+
+test("parses and matches web page translation site rules", () => {
+  const rules = core.parseWebTranslationSiteRules(JSON.stringify([
+    {
+      name: "Docs",
+      matches: ["docs.example.com", "*.papers.example.org"],
+      rootSelector: "article, main",
+      blockSelector: ".content p, .content h2",
+      includeSelectors: [".content p"],
+      excludeSelectors: [".ad", ".newsletter"],
+      minTextLength: 12,
+      minWords: 2,
+    },
+  ]));
+
+  assert.equal(rules.length, 1);
+  assert.equal(rules[0].name, "Docs");
+  assert.deepEqual(rules[0].includeSelectors, [".content p"]);
+  assert.equal(
+    core.matchWebTranslationSiteRule("https://docs.example.com/page", rules)?.name,
+    "Docs",
+  );
+  assert.equal(
+    core.matchWebTranslationSiteRule("https://intro.papers.example.org/a", rules)?.name,
+    "Docs",
+  );
+  assert.equal(core.matchWebTranslationSiteRule("https://example.com", rules), null);
+  assert.deepEqual(core.parseWebTranslationSiteRules("{bad json"), []);
+});
+
+test("creates stable web page translation cache keys", () => {
+  const first = core.createWebPageTranslationCacheKey({
+    provider: "gemini",
+    model: "gemini-2.5-flash-lite",
+    pageUrl: "https://example.com/article?utm_source=test#section",
+    sourceLanguage: "en",
+    targetLanguage: "zh-CN",
+    promptVersion: core.WEB_TRANSLATION_PROMPT_VERSION,
+    glossaryVersion: "abc",
+    sourceText: "Gradient   descent finds it.",
+    headingPath: ["Gradient Handoff"],
+  });
+  const second = core.createWebPageTranslationCacheKey({
+    provider: "gemini",
+    model: "gemini-2.5-flash-lite",
+    pageUrl: "https://example.com/article",
+    sourceLanguage: "en",
+    targetLanguage: "zh-CN",
+    promptVersion: core.WEB_TRANSLATION_PROMPT_VERSION,
+    glossaryVersion: "abc",
+    sourceText: "Gradient descent finds it.",
+    headingPath: ["Gradient Handoff"],
+  });
+  const changed = core.createWebPageTranslationCacheKey({
+    provider: "gemini",
+    model: "gemini-2.5-flash-lite",
+    pageUrl: "https://example.com/article",
+    sourceLanguage: "en",
+    targetLanguage: "zh-CN",
+    promptVersion: core.WEB_TRANSLATION_PROMPT_VERSION,
+    glossaryVersion: "abc",
+    sourceText: "Attention learned it.",
+    headingPath: ["Gradient Handoff"],
+  });
+
+  assert.equal(first, second);
+  assert.notEqual(first, changed);
+});
+
+test("sorts web page blocks by visual reading order", () => {
+  const blocks = core.sortWebPageBlocksByPosition([
+    { id: "body-first", top: 200, left: 120, order: 1 },
+    { id: "right-heading", top: 100, left: 640, order: 2 },
+    { id: "left-heading", top: 104, left: 40, order: 3 },
+    { id: "next-section", top: 480, left: 40, order: 4 },
+  ]);
+
+  assert.deepEqual(
+    blocks.map((block) => block.id),
+    ["left-heading", "right-heading", "body-first", "next-section"],
+  );
+});
+
+test("web page translator includes content hero headers without translating scroll cues", () => {
+  const translator = fs.readFileSync(
+    path.join(projectRoot, "src", "web_page_translator.js"),
+    "utf8",
+  );
+  const skipSelectorSource = translator.match(
+    /const SKIP_SELECTOR = \[([\s\S]*?)\]\.join/,
+  )?.[1];
+
+  assert.ok(skipSelectorSource);
+  assert.doesNotMatch(skipSelectorSource, /"header"/);
+  assert.match(translator, /"\.kicker"/);
+  assert.match(translator, /"\.sub"/);
+  assert.doesNotMatch(translator, /"\.scrollcue"/);
+  assert.match(translator, /function isNavigationHeader\(/);
+  assert.match(translator, /function isInsideSkippedRegion\(/);
+  assert.match(translator, /element\.closest\("header"\)/);
+  assert.match(translator, /core\.isProbablyCodeText\(text\)/);
+});
+
+test("web page translator matches translation typography to the source block", () => {
+  const translator = fs.readFileSync(
+    path.join(projectRoot, "src", "web_page_translator.js"),
+    "utf8",
+  );
+  const translatorCss = fs.readFileSync(
+    path.join(projectRoot, "src", "web_page_translator.css"),
+    "utf8",
+  );
+  const translationRule = translatorCss.match(
+    /\.ytct-web-translation\s*\{([^}]*)\}/,
+  )?.[1] || "";
+  const translationModeRule = translatorCss.match(
+    /\.ytct-web-translation\[data-mode="translation"\]\s*\{([^}]*)\}/,
+  )?.[1] || "";
+
+  assert.match(translationRule, /font:\s*inherit/);
+  assert.match(translationRule, /font-size:\s*inherit/);
+  assert.match(translationRule, /color:\s*inherit/);
+  assert.doesNotMatch(translationRule, /font-size:\s*0\.96em/);
+  assert.doesNotMatch(translationRule, /color:\s*#[0-9a-f]/i);
+  assert.doesNotMatch(translationModeRule, /color:/i);
+  assert.match(translator, /function syncTranslationTypography\(/);
+  assert.match(translator, /window\.getComputedStyle\(sourceElement\)/);
+  assert.match(translator, /"color"/);
+  assert.match(translator, /"fontFamily"/);
+  assert.match(translator, /"fontSize"/);
+  assert.match(translator, /"fontWeight"/);
+  assert.match(translator, /syncTranslationTypography\(element, block\.element\)/);
+});
+
+test("web page translator supports translation-only mode without leaving source hidden after cleanup", () => {
+  const translator = fs.readFileSync(
+    path.join(projectRoot, "src", "web_page_translator.js"),
+    "utf8",
+  );
+  const translatorCss = fs.readFileSync(
+    path.join(projectRoot, "src", "web_page_translator.css"),
+    "utf8",
+  );
+
+  assert.match(translator, /const SOURCE_HIDDEN_CLASS = "ytct-web-source-hidden"/);
+  assert.match(translator, /function restoreSourceElement\(block\)/);
+  assert.match(translator, /function applySourceDisplayMode\(block\)/);
+  assert.match(translator, /webTranslationDisplayMode === "translation"/);
+  assert.match(translator, /block\.element\.classList\.add\(SOURCE_HIDDEN_CLASS\)/);
+  assert.match(translator, /block\.element\.classList\.remove\(SOURCE_HIDDEN_CLASS\)/);
+  assert.match(translator, /document\.querySelectorAll\(`\.\$\{SOURCE_HIDDEN_CLASS\}`\)/);
+  assert.match(translatorCss, /\.ytct-web-source-hidden\s*\{/);
+  assert.match(translatorCss, /font-size:\s*0\s*!important/);
+  assert.match(translatorCss, /color:\s*transparent\s*!important/);
+});
+
+test("web page translator reports progress and failed web page blocks", () => {
+  const translator = fs.readFileSync(
+    path.join(projectRoot, "src", "web_page_translator.js"),
+    "utf8",
+  );
+
+  assert.match(translator, /function translationProgress\(/);
+  assert.match(translator, /block\.status = "failed"/);
+  assert.match(translator, /网页翻译已更新：\$\{progress\.ready\}\/\$\{progress\.total\} 段/);
+  assert.match(translator, /段未返回译文/);
+});
+
+test("web page translator keeps queued dynamic blocks in visual order", () => {
+  const translator = fs.readFileSync(
+    path.join(projectRoot, "src", "web_page_translator.js"),
+    "utf8",
+  );
+
+  assert.match(translator, /function orderedBlockIndex\(block\)/);
+  assert.match(translator, /function insertQueuedBlock\(block\)/);
+  assert.doesNotMatch(translator, /state\.queue\.push\(block\)/);
+  assert.match(translator, /state\.queue\.splice\(insertIndex, 0, block\)/);
+});
+
+test("web page translator resets stale translations when source block text changes", () => {
+  const translator = fs.readFileSync(
+    path.join(projectRoot, "src", "web_page_translator.js"),
+    "utf8",
+  );
+
+  assert.match(translator, /function resetBlockIfSourceChanged\(/);
+  assert.match(translator, /previousText && previousText !== nextText/);
+  assert.match(translator, /block\.translationElement\.remove\(\)/);
+  assert.match(translator, /block\.status = "pending"/);
+});
+
+test("web page translator ignores its own DOM mutations during injection and cleanup", () => {
+  const translator = fs.readFileSync(
+    path.join(projectRoot, "src", "web_page_translator.js"),
+    "utf8",
+  );
+
+  assert.match(translator, /function isOwnTranslationNode\(/);
+  assert.match(translator, /function isOwnMutation\(mutation\)/);
+  assert.match(translator, /Array\.from\(mutation\.addedNodes \|\| \[\]\)/);
+  assert.match(translator, /Array\.from\(mutation\.removedNodes \|\| \[\]\)/);
+  assert.match(translator, /mutation\.attributeName === "class"/);
+  assert.match(translator, /classList\?\.contains\(SOURCE_HIDDEN_CLASS\)/);
+  assert.match(translator, /mutation\.oldValue\?\.includes\(SOURCE_HIDDEN_CLASS\)/);
+  assert.match(translator, /attributeOldValue:\s*true/);
+  assert.match(translator, /mutations\.every\(isOwnMutation\)/);
+});
+
+test("web page translation supports YouTube watch descriptions and comments", () => {
+  const background = fs.readFileSync(
+    path.join(projectRoot, "src", "background.js"),
+    "utf8",
+  );
+  const translator = fs.readFileSync(
+    path.join(projectRoot, "src", "web_page_translator.js"),
+    "utf8",
+  );
+
+  assert.match(background, /function isYouTubeWatchUrl\(/);
+  assert.match(background, /isYouTubeWatchUrl\(url\)/);
+  assert.doesNotMatch(background, /return !\/\\\.\?youtube\\\.com\$\/i\.test\(url\.hostname\)/);
+  assert.match(translator, /const YOUTUBE_ROOT_SELECTOR/);
+  assert.match(translator, /"ytd-watch-metadata"/);
+  assert.match(translator, /"ytd-comments"/);
+  assert.match(translator, /const YOUTUBE_BLOCK_SELECTOR/);
+  assert.match(translator, /"#description-inline-expander #snippet-text"/);
+  assert.match(translator, /"#description-inline-expander\[is-expanded\] #expanded yt-attributed-string"/);
+  assert.match(translator, /"ytd-expandable-video-description-body-renderer ytd-text-inline-expander#inline-expander"/);
+  assert.match(translator, /"ytd-comment-thread-renderer #content-text"/);
+  assert.match(translator, /function isYouTubeWatchPage\(/);
+  assert.match(translator, /function isYouTubeTextBlock\(/);
+  assert.match(translator, /if \(isYouTubeWatchPage\(\)\)/);
+  assert.match(translator, /attributes:\s*true/);
+  assert.match(translator, /attributeFilter:\s*\["class", "hidden", "is-expanded", "style"\]/);
+});
+
+test("web page translator replaces stale injected instances after extension reload", () => {
+  const translator = fs.readFileSync(
+    path.join(projectRoot, "src", "web_page_translator.js"),
+    "utf8",
+  );
+
+  assert.doesNotMatch(translator, /if \(window\.__YTCT_WEB_PAGE_TRANSLATOR__\) \{\s*return;\s*\}/);
+  assert.match(translator, /const previousController = window\.__YTCT_WEB_PAGE_TRANSLATOR__/);
+  assert.match(translator, /previousController\.stop\("replaced"\)/);
+  assert.match(translator, /const YTCT_WEB_INSTANCE_ID = `ytct-web-/);
+  assert.match(translator, /function handleRuntimeMessage\(/);
+  assert.match(translator, /chrome\.runtime\.onMessage\.removeListener\(handleRuntimeMessage\)/);
+  assert.match(translator, /window\.__YTCT_WEB_PAGE_TRANSLATOR__ = \{/);
+  assert.match(translator, /instanceId: YTCT_WEB_INSTANCE_ID/);
+  assert.match(translator, /stop/);
+});
+
+test("wires web page translation 3.0 through manifest, background, popup, and options", () => {
+  const manifest = JSON.parse(
+    fs.readFileSync(path.join(projectRoot, "manifest.json"), "utf8"),
+  );
+  const background = fs.readFileSync(
+    path.join(projectRoot, "src", "background.js"),
+    "utf8",
+  );
+  const popupHtml = fs.readFileSync(
+    path.join(projectRoot, "src", "popup.html"),
+    "utf8",
+  );
+  const popupScript = fs.readFileSync(
+    path.join(projectRoot, "src", "popup.js"),
+    "utf8",
+  );
+  const optionsHtml = fs.readFileSync(
+    path.join(projectRoot, "src", "options.html"),
+    "utf8",
+  );
+  const optionsScript = fs.readFileSync(
+    path.join(projectRoot, "src", "options.js"),
+    "utf8",
+  );
+  const translator = fs.readFileSync(
+    path.join(projectRoot, "src", "web_page_translator.js"),
+    "utf8",
+  );
+  const translatorCss = fs.readFileSync(
+    path.join(projectRoot, "src", "web_page_translator.css"),
+    "utf8",
+  );
+
+  assert.equal(manifest.version, "3.0.0");
+  assert.ok(manifest.permissions.includes("activeTab"));
+  assert.ok(manifest.permissions.includes("scripting"));
+  assert.match(background, /YTCT_TRANSLATE_WEB_PAGE_BATCH/);
+  assert.match(background, /YTCT_START_WEB_PAGE_TRANSLATION/);
+  assert.match(background, /chrome\.scripting\.executeScript/);
+  assert.match(background, /src\/web_page_translator\.js/);
+  assert.match(popupHtml, /id="translatePage"/);
+  assert.match(popupHtml, /id="clearPageTranslations"/);
+  assert.match(popupHtml, /id="popupWebTranslationTargetLanguage"/);
+  assert.match(popupHtml, /id="popupWebTranslationDisplayMode"/);
+  assert.match(popupHtml, /id="popupWebTranslationScope"/);
+  assert.match(popupScript, /YTCT_START_WEB_PAGE_TRANSLATION/);
+  assert.match(popupScript, /YTCT_CLEAR_WEB_PAGE_TRANSLATION/);
+  assert.match(popupScript, /function webTranslationSettingsFromPopup\(/);
+  assert.match(popupScript, /webTranslationTargetLanguage/);
+  assert.match(popupScript, /webTranslationDisplayMode/);
+  assert.match(popupScript, /webTranslationScope/);
+  assert.match(optionsHtml, /id="webTranslationEnabled"/);
+  assert.match(optionsHtml, /id="webTranslationTargetLanguage"/);
+  assert.match(optionsHtml, /id="webTranslationDisplayMode"/);
+  assert.match(optionsHtml, /id="webTranslationScope"/);
+  assert.match(optionsHtml, /id="webTranslationSiteRules"/);
+  assert.match(optionsScript, /webTranslationEnabled/);
+  assert.match(optionsScript, /webTranslationSiteRules/);
+  assert.match(translator, /IntersectionObserver/);
+  assert.match(translator, /MutationObserver/);
+  assert.match(translator, /function scanRoots\(\)/);
+  assert.match(translator, /function currentSiteRule\(\)/);
+  assert.match(translator, /YTCT_ANALYZE_WEB_PAGE_MEMORY/);
+  assert.match(translator, /function takeNextSectionBatch\(/);
+  assert.match(translator, /function protectedTermsForElement\(/);
+  assert.match(translator, /"a\[href\],code,kbd,samp,var,math,\[role='math'\],\.katex,\.MathJax"/);
+  assert.match(translator, /protectedTerms:\s*block\.protectedTerms/);
+  assert.match(translator, /querySelectorAll\("article"\)/);
+  assert.doesNotMatch(translator, /document\.querySelector\("article"\) \|\|/);
+  assert.match(translator, /core\.sortWebPageBlocksByPosition/);
+  assert.match(translator, /YTCT_TRANSLATE_WEB_PAGE_BATCH/);
+  assert.match(translator, /data-ytct-web-translation/);
+  assert.match(translator, /firstIndex < 0 \|\| lastIndex < 0/);
+  assert.match(background, /YTCT_ANALYZE_WEB_PAGE_MEMORY/);
+  assert.match(background, /core\.buildWebPageRepairPrompt/);
+  assert.match(background, /core\.validateWebPageTranslationResult/);
+  assert.match(translatorCss, /\.ytct-web-translation/);
 });

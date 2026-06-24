@@ -86,6 +86,37 @@
       </section>
 
       <section class="panel">
+        <h2>网页翻译</h2>
+        <label class="switch">
+          <input id="webTranslationEnabled" type="checkbox" />
+          启用网页翻译
+        </label>
+        <label>
+          目标语言
+          <input id="webTranslationTargetLanguage" type="text" spellcheck="false" placeholder="zh-CN" />
+        </label>
+        <label>
+          显示模式
+          <select id="webTranslationDisplayMode">
+            <option value="bilingual">原文下方插入译文</option>
+            <option value="translation">仅插入译文样式</option>
+          </select>
+        </label>
+        <label>
+          翻译范围
+          <select id="webTranslationScope">
+            <option value="page">整页渐进翻译</option>
+            <option value="viewport">当前视窗附近，滚动时继续</option>
+          </select>
+        </label>
+        <label>
+          站点规则 JSON
+          <textarea id="webTranslationSiteRules" spellcheck="false" placeholder='[{"name":"Example","matches":["example.com"],"rootSelector":"article, main","blockSelector":"p,h1,h2,li","excludeSelectors":[".ad"]}]'></textarea>
+        </label>
+        <p class="hint">网页翻译需要在 popup 中手动点击「翻译当前网页」；不会常驻读取所有网站。</p>
+      </section>
+
+      <section class="panel">
         <h2>字幕显示</h2>
         <label>
           原文显示

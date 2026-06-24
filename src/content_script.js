@@ -1212,6 +1212,28 @@
     return state.timeline.findIndex((cue) => cue.start > video.currentTime);
   }
 
+  function getTimelineEnd() {
+    return state.timeline.reduce((latest, cue) => {
+      const end = Number(cue.end);
+      return Number.isFinite(end) ? Math.max(latest, end) : latest;
+    }, 0);
+  }
+
+  function shouldFallbackAfterTimelineGap(video) {
+    const currentTime = Number(video?.currentTime);
+    const timelineEnd = getTimelineEnd();
+    const videoDuration = Number(video?.duration);
+    if (!Number.isFinite(currentTime) || currentTime <= timelineEnd + 0.5) {
+      return false;
+    }
+    if (Number.isFinite(videoDuration) && videoDuration - timelineEnd <= 5) {
+      return false;
+    }
+
+    const visibleText = readCaptionText();
+    return Boolean(visibleText && !core.isNonSpeechCaptionText(visibleText));
+  }
+
   function renderTimelineCue() {
     if (state.timelineMode !== "track") {
       return;
@@ -1230,6 +1252,16 @@
 
     const cue = core.findCueAtTime(state.timeline, video.currentTime);
     if (!cue) {
+      if (shouldFallbackAfterTimelineGap(video)) {
+        switchToFallback("timeline-gap");
+        return;
+      }
+      renderOverlay("", "ready");
+      prefetchTimelineTranslations();
+      return;
+    }
+
+    if (core.isNonSpeechCaptionText(cue.source)) {
       renderOverlay("", "ready");
       prefetchTimelineTranslations();
       return;
@@ -1262,7 +1294,12 @@
     );
     return state.timeline
       .slice(currentIndex, searchEnd)
-      .filter((cue) => cue.status === "pending" && cue.source)
+      .filter(
+        (cue) =>
+          cue.status === "pending" &&
+          cue.source &&
+          !core.isNonSpeechCaptionText(cue.source),
+      )
       .slice(0, TIMELINE_BATCH_SIZE);
   }
 
@@ -1705,6 +1742,13 @@
 
     const currentText = readCaptionText();
     if (!currentText) {
+      state.pendingFallbackText = "";
+      clearFallbackDebounce();
+      state.lastText = "";
+      renderOverlay("", "ready");
+      return;
+    }
+    if (core.isNonSpeechCaptionText(currentText)) {
       state.pendingFallbackText = "";
       clearFallbackDebounce();
       state.lastText = "";

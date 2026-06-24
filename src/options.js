@@ -23,6 +23,11 @@ const form = {
   userGlossary: document.querySelector("#userGlossary"),
   syncStrategy: document.querySelector("#syncStrategy"),
   sourceDisplayMode: document.querySelector("#sourceDisplayMode"),
+  webTranslationEnabled: document.querySelector("#webTranslationEnabled"),
+  webTranslationTargetLanguage: document.querySelector("#webTranslationTargetLanguage"),
+  webTranslationDisplayMode: document.querySelector("#webTranslationDisplayMode"),
+  webTranslationScope: document.querySelector("#webTranslationScope"),
+  webTranslationSiteRules: document.querySelector("#webTranslationSiteRules"),
   overlayOpacityPercent: document.querySelector("#overlayOpacityPercent"),
   overlayOpacityValue: document.querySelector("#overlayOpacityValue"),
   overlayFontScalePercent: document.querySelector("#overlayFontScalePercent"),
@@ -123,6 +128,13 @@ async function loadSettings() {
   form.userGlossary.value = settings.userGlossary || "";
   form.syncStrategy.value = settings.syncStrategy || "cue";
   form.sourceDisplayMode.value = settings.sourceDisplayMode || "raw";
+  form.webTranslationEnabled.checked = settings.webTranslationEnabled !== false;
+  form.webTranslationTargetLanguage.value =
+    settings.webTranslationTargetLanguage || "zh-CN";
+  form.webTranslationDisplayMode.value =
+    settings.webTranslationDisplayMode || "bilingual";
+  form.webTranslationScope.value = settings.webTranslationScope || "page";
+  form.webTranslationSiteRules.value = settings.webTranslationSiteRules || "";
   form.overlayOpacityPercent.value = settings.overlayOpacityPercent;
   form.overlayFontScalePercent.value = settings.overlayFontScalePercent;
   state.overlayXPercent = settings.overlayXPercent;
@@ -144,6 +156,11 @@ async function saveSettings() {
     userGlossary: form.userGlossary.value,
     syncStrategy: form.syncStrategy.value,
     sourceDisplayMode: form.sourceDisplayMode.value,
+    webTranslationEnabled: form.webTranslationEnabled.checked,
+    webTranslationTargetLanguage: form.webTranslationTargetLanguage.value,
+    webTranslationDisplayMode: form.webTranslationDisplayMode.value,
+    webTranslationScope: form.webTranslationScope.value,
+    webTranslationSiteRules: form.webTranslationSiteRules.value,
     overlayOpacityPercent: form.overlayOpacityPercent.value,
     overlayFontScalePercent: form.overlayFontScalePercent.value,
     overlayXPercent: state.overlayXPercent,
