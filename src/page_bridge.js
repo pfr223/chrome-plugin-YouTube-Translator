@@ -399,6 +399,30 @@
     const seenRows = new Set();
     const timestampPattern = /\b\d{1,2}:\d{2}(?::\d{2})?(?:\.\d+)?\b/;
 
+    function looksLikeMergedTranscriptDomRow(rowText, source) {
+      const normalizedRowText = normalizeText(rowText);
+      const normalizedSource = normalizeText(source);
+      if (normalizedSource.length < 220) {
+        return false;
+      }
+
+      const timestampCount =
+        (
+          normalizedRowText.match(
+            /\b\d{1,2}:\d{2,4}\b/g,
+          ) || []
+        ).length +
+        (
+          normalizedSource.match(
+            /\b\d{1,2}:\d{2,4}\b/g,
+          ) || []
+        ).length;
+      const durationLabelCount =
+        (normalizedRowText.match(/(?:minutes?|seconds?)/gi) || []).length +
+        (normalizedSource.match(/(?:minutes?|seconds?)/gi) || []).length;
+      return timestampCount >= 2 || durationLabelCount >= 3;
+    }
+
     function pushRow(element) {
       if (!element || seenElements.has(element)) {
         return;
@@ -426,7 +450,11 @@
         textElement?.textContent || rowText.replace(timestampPattern, ""),
       );
       const key = `${timestamp}::${text.toLowerCase()}`;
-      if (!text || seenRows.has(key)) {
+      if (
+        !text ||
+        looksLikeMergedTranscriptDomRow(rowText, text) ||
+        seenRows.has(key)
+      ) {
         return;
       }
       seenRows.add(key);

@@ -13,13 +13,19 @@
     customInstructions: "",
     userGlossary: "",
     sourceDisplayMode: "raw",
-    syncStrategy: "cue",
+    syncStrategy: "segment",
+    webTranslationEnabled: true,
+    webTranslationTargetLanguage: "zh-CN",
+    webTranslationDisplayMode: "bilingual",
+    webTranslationScope: "page",
+    webTranslationSiteRules: "",
     overlayOpacityPercent: 78,
     overlayFontScalePercent: 100,
     overlayXPercent: 50,
     overlayYPercent: 86,
   });
-  const TRANSLATION_PROMPT_VERSION = "segment-v2";
+  const TRANSLATION_PROMPT_VERSION = "segment-v3";
+  const WEB_TRANSLATION_PROMPT_VERSION = "web-v1";
   const COURSE_TRANSLATION_GUIDANCE = Object.freeze([
     "Assume this is an ML/AI/RL course lecture unless metadata clearly says otherwise.",
     "Translate for a Chinese learner taking technical notes: concise, natural, and synchronized.",
@@ -41,8 +47,52 @@
       .trim();
   }
 
+  function isProbablyCodeText(value) {
+    const source = normalizeCaptionText(value);
+    if (!source) {
+      return false;
+    }
+    const codeMarks = (source.match(/[{}[\]<>`]|=>|::|;\s|&&|\|\|/g) || []).length;
+    if (codeMarks >= 3) {
+      return true;
+    }
+    return (
+      /\b(?:const|let|var)\s+[A-Za-z_$][\w$]*\s*=/.test(source) ||
+      /\bfunction\s+[A-Za-z_$][\w$]*\s*\(/.test(source) ||
+      /\bclass\s+[A-Za-z_$][\w$]*(?:\s+extends\s+[A-Za-z_$][\w$]*)?\s*\{/.test(source) ||
+      /\b(?:import|export)\s+(?:\{|\*|default|const|function|class|[A-Za-z_$][\w$]*\s+from\b)/.test(source) ||
+      /\breturn\s+.*[;{}]/.test(source)
+    );
+  }
+
+  function isSeparatorOnlyLine(value) {
+    const source = normalizeCaptionText(value);
+    return Boolean(source) && /^[\s▀▄█▔▁─━—\-_=•·]+$/.test(source);
+  }
+
+  function splitWebPageTextSegments(value) {
+    return String(value || "")
+      .replace(/\r\n?/g, "\n")
+      .split(/\n+/)
+      .map(normalizeCaptionText)
+      .filter((line) => line && !isSeparatorOnlyLine(line));
+  }
+
   function cleanTranslationText(value) {
     return normalizeCaptionText(value).replace(/^[\s、，,。；;：:]+/, "");
+  }
+
+  function runtimeErrorMessage(error, fallback = "操作失败") {
+    const message = normalizeCaptionText(
+      typeof error === "string" ? error : error?.message || "",
+    );
+    if (
+      /extension context invalidated|receiving end does not exist|context invalidated/i
+        .test(message)
+    ) {
+      return "扩展已重新加载，请刷新页面后继续使用。";
+    }
+    return message || fallback;
   }
 
   function clampInteger(value, min, max, fallback) {
@@ -119,9 +169,25 @@
         typeof value.userGlossary === "string" ? value.userGlossary.trim() : "",
       sourceDisplayMode: value.sourceDisplayMode === "clean" ? "clean" : "raw",
       syncStrategy:
-        value.syncStrategy === "segment" || value.syncStrategy === "hybrid"
+        value.syncStrategy === "cue" ||
+        value.syncStrategy === "segment" ||
+        value.syncStrategy === "hybrid"
           ? value.syncStrategy
-          : "cue",
+          : DEFAULT_SETTINGS.syncStrategy,
+      webTranslationEnabled: value.webTranslationEnabled !== false,
+      webTranslationTargetLanguage:
+        normalizeCaptionText(value.webTranslationTargetLanguage) ||
+        DEFAULT_SETTINGS.webTranslationTargetLanguage,
+      webTranslationDisplayMode:
+        value.webTranslationDisplayMode === "translation"
+          ? "translation"
+          : "bilingual",
+      webTranslationScope:
+        value.webTranslationScope === "viewport" ? "viewport" : "page",
+      webTranslationSiteRules:
+        typeof value.webTranslationSiteRules === "string"
+          ? value.webTranslationSiteRules
+          : DEFAULT_SETTINGS.webTranslationSiteRules,
       overlayOpacityPercent: clampInteger(
         value.overlayOpacityPercent,
         0,
@@ -237,6 +303,32 @@
       deduped.push(word);
     }
     return deduped.join(" ");
+  }
+
+  function hasNonSpeechCaptionTerm(text) {
+    return /\b(?:music|applause|laughter|laughs|laughing|cheering|silence|inaudible|unintelligible)\b/i.test(
+      text,
+    ) || /音乐|掌声|笑声|听不清/.test(text);
+  }
+
+  function isNonSpeechCaptionText(value) {
+    const text = normalizeCaptionText(value);
+    if (!text) {
+      return false;
+    }
+    if (/^[\s♪♫♬♩-]+$/.test(text)) {
+      return true;
+    }
+
+    const annotationOnly = /^(?:[\[(（【][^\])）】]+[\])）】]\s*)+$/.test(text);
+    if (!annotationOnly) {
+      return false;
+    }
+
+    const annotationText = normalizeCaptionText(
+      text.replace(/[\[(（【\])）】]/g, " "),
+    );
+    return hasNonSpeechCaptionTerm(annotationText);
   }
 
   function hasVisibleVerticalOverlap(rect, windowRect) {
@@ -624,6 +716,21 @@
       .map((cue, index) => ({ ...cue, id: `cue-${index}` }));
   }
 
+  function inferTranscriptCueEnd(rawCues, index, videoDurationSeconds) {
+    const cue = rawCues[index] || {};
+    const start = Number(cue.start);
+    const nextStart = Number(rawCues[index + 1]?.start);
+    if (Number.isFinite(nextStart) && nextStart > start) {
+      return nextStart - 0.001;
+    }
+
+    const defaultEnd = start + 5;
+    const videoDuration = Number(videoDurationSeconds);
+    return Number.isFinite(videoDuration) && videoDuration > start
+      ? Math.min(videoDuration, defaultEnd)
+      : defaultEnd;
+  }
+
   function parseVttCaptions(text) {
     return makeTimeline(
       String(text || "")
@@ -832,17 +939,9 @@
     rawCues.sort((left, right) => Number(left.start) - Number(right.start));
     return makeTimeline(
       rawCues.map((cue, index) => {
-        const nextStart = Number(rawCues[index + 1]?.start);
-        const videoDuration = Number(videoDurationSeconds);
-        const end =
-          Number.isFinite(nextStart) && nextStart > cue.start
-            ? nextStart - 0.001
-            : Number.isFinite(videoDuration) && videoDuration > cue.start
-              ? videoDuration
-              : cue.start + 5;
         return {
           start: cue.start,
-          end,
+          end: inferTranscriptCueEnd(rawCues, index, videoDurationSeconds),
           source: cue.source,
         };
       }),
@@ -852,6 +951,22 @@
   function parseTranscriptDomRows(rows, videoDurationSeconds) {
     const rawCues = [];
     const seen = new Set();
+
+    function looksLikeMergedTranscriptDomRow(rowText, source) {
+      const normalizedRowText = normalizeCaptionText(rowText);
+      const normalizedSource = normalizeCaptionText(source);
+      if (normalizedSource.length < 220) {
+        return false;
+      }
+
+      const timestampCount =
+        (normalizedRowText.match(/\b\d{1,2}:\d{2,4}\b/g) || []).length +
+        (normalizedSource.match(/\b\d{1,2}:\d{2,4}\b/g) || []).length;
+      const durationLabelCount =
+        (normalizedRowText.match(/(?:minutes?|seconds?)/gi) || []).length +
+        (normalizedSource.match(/(?:minutes?|seconds?)/gi) || []).length;
+      return timestampCount >= 2 || durationLabelCount >= 3;
+    }
 
     (Array.isArray(rows) ? rows : []).forEach((row) => {
       const rowText =
@@ -880,7 +995,12 @@
       );
       const key = `${roundSeconds(start)}::${source.toLowerCase()}`;
 
-      if (!source || !Number.isFinite(start) || seen.has(key)) {
+      if (
+        !source ||
+        !Number.isFinite(start) ||
+        looksLikeMergedTranscriptDomRow(rowText, source) ||
+        seen.has(key)
+      ) {
         return;
       }
       seen.add(key);
@@ -890,17 +1010,9 @@
     rawCues.sort((left, right) => Number(left.start) - Number(right.start));
     return makeTimeline(
       rawCues.map((cue, index) => {
-        const nextStart = Number(rawCues[index + 1]?.start);
-        const videoDuration = Number(videoDurationSeconds);
-        const end =
-          Number.isFinite(nextStart) && nextStart > cue.start
-            ? nextStart - 0.001
-            : Number.isFinite(videoDuration) && videoDuration > cue.start
-              ? videoDuration
-              : cue.start + 5;
         return {
           start: cue.start,
-          end,
+          end: inferTranscriptCueEnd(rawCues, index, videoDurationSeconds),
           source: cue.source,
         };
       }),
@@ -1035,7 +1147,13 @@
   }
 
   function buildTranslationSegmentsFromCues(cues, options = {}) {
-    const maxCuesPerSegment = clampInteger(options.maxCuesPerSegment, 1, 10, 5);
+    const isAsrCaption = normalizeCaptionText(options.captionKind) === "asr";
+    const maxCuesPerSegment = clampInteger(
+      options.maxCuesPerSegment,
+      1,
+      isAsrCaption ? 30 : 10,
+      isAsrCaption ? 18 : 5,
+    );
     const maxWordsPerSegment = clampInteger(options.maxWordsPerSegment, 4, 80, 45);
     const maxSegmentChars = clampInteger(options.maxSegmentChars, 80, 600, 220);
     const maxDurationSeconds = Number.isFinite(Number(options.maxDurationSeconds))
@@ -1224,6 +1342,348 @@
     }
 
     return { cueTranslations: {}, segmentTranslations: {} };
+  }
+
+  function compactWebPageBlock(block) {
+    const id = normalizeCaptionText(block?.id);
+    const text = normalizeCaptionText(block?.text || block?.source || "");
+    if (!id || !text) {
+      return null;
+    }
+    return {
+      id,
+      tagName: normalizeCaptionText(block?.tagName || "block").toLowerCase(),
+      role: normalizeCaptionText(block?.role || ""),
+      headingPath: (Array.isArray(block?.headingPath) ? block.headingPath : [])
+        .map(normalizeCaptionText)
+        .filter(Boolean)
+        .slice(-4),
+      protected_terms: normalizeWebPageProtectedTerms(
+        block?.protectedTerms || block?.protected_terms,
+      ),
+      text,
+    };
+  }
+
+  function normalizeWebPageProtectedTerms(value) {
+    const terms = Array.isArray(value) ? value : [];
+    const seen = new Set();
+    const normalized = [];
+    terms.forEach((item) => {
+      const text = normalizeCaptionText(
+        typeof item === "string" ? item : item?.text || item?.source || "",
+      );
+      const kind = normalizeCaptionText(
+        typeof item === "object" && item ? item.kind || item.type || "" : "",
+      ).toLowerCase();
+      if (!text) {
+        return;
+      }
+      const key = `${kind}:${text.toLowerCase()}`;
+      if (seen.has(key)) {
+        return;
+      }
+      seen.add(key);
+      normalized.push({ text, kind: kind || "text" });
+    });
+    return normalized.slice(0, 24);
+  }
+
+  function buildWebPageTranslationPrompt(options = {}) {
+    const {
+      blocks = [],
+      nonOutputContextBefore = [],
+      nonOutputContextAfter = [],
+      pageContext = {},
+      pageMemory = {},
+      customInstructions = "",
+      userGlossary = [],
+      targetLanguage = DEFAULT_SETTINGS.webTranslationTargetLanguage,
+    } = options || {};
+    const outputBlocks = (Array.isArray(blocks) ? blocks : [])
+      .map(compactWebPageBlock)
+      .filter(Boolean);
+    const before = (Array.isArray(nonOutputContextBefore)
+      ? nonOutputContextBefore
+      : [])
+      .map(compactWebPageBlock)
+      .filter(Boolean);
+    const after = (Array.isArray(nonOutputContextAfter)
+      ? nonOutputContextAfter
+      : [])
+      .map(compactWebPageBlock)
+      .filter(Boolean);
+    const promptInput = {
+      page: {
+        title: normalizeCaptionText(pageContext.title),
+        url: normalizeCaptionText(pageContext.url),
+        language: normalizeCaptionText(pageContext.language),
+      },
+      target_language:
+        normalizeCaptionText(targetLanguage) ||
+        DEFAULT_SETTINGS.webTranslationTargetLanguage,
+      pageMemory: pageMemory && typeof pageMemory === "object" ? pageMemory : {},
+      user_glossary: normalizeGlossaryForPrompt(userGlossary),
+      non_output_context_before: before,
+      output_blocks: outputBlocks,
+      non_output_context_after: after,
+    };
+    const lines = [
+      "Task: translate ordinary web page text into the requested target language.",
+      "Use the page title, headings, surrounding blocks, glossary, and previous page memory to keep terminology consistent.",
+      "Preserve the original DOM structure: do not ask to rewrite HTML, merge blocks, remove source text, or change block ids.",
+      "Translate each output block naturally at paragraph or heading level, not word by word.",
+      "Translate each output block as part of its surrounding section, using headingPath and adjacent blocks to resolve pronouns and terminology.",
+      "Do not translate, rewrite, or drop protected_terms such as inline code, URLs, formulas, variables, and identifiers; copy them exactly into the translation when they belong to that block.",
+      "Skip boilerplate meaning only when it appears in non-output context; still translate every output_blocks item.",
+      "Glossary priority: User glossary > page memory glossary > model default translation.",
+      "",
+      'Return only JSON in this exact shape: {"translations":[{"id":"web-block-0","translation":"..."}],"glossary":[{"source":"...","translation":"..."}]}',
+      "",
+      "Input JSON:",
+      JSON.stringify(promptInput, null, 2),
+    ];
+
+    if (normalizeCaptionText(customInstructions)) {
+      lines.push("", "User translation preferences:", normalizeCaptionText(customInstructions));
+    }
+
+    return lines.join("\n");
+  }
+
+  function parseWebPageTranslationResponse(text) {
+    const stripped = stripFences(text);
+    const candidates = [stripped];
+    const objectMatch = stripped.match(/\{[\s\S]*"translations"\s*:[\s\S]*\}/);
+    if (objectMatch) {
+      candidates.push(objectMatch[0]);
+    }
+
+    for (const candidate of candidates) {
+      try {
+        const parsed = JSON.parse(candidate);
+        const items = Array.isArray(parsed?.translations)
+          ? parsed.translations
+          : [];
+        const translations = items.reduce((result, item) => {
+          const id = normalizeCaptionText(item?.id);
+          const translation = cleanTranslationText(item?.translation);
+          if (id && translation) {
+            result[id] = translation;
+          }
+          return result;
+        }, {});
+        return {
+          translations,
+          glossary: normalizeGlossaryItems(parsed?.glossary),
+        };
+      } catch (_error) {
+        // Try the next candidate.
+      }
+    }
+
+    return { translations: {}, glossary: [] };
+  }
+
+  function buildWebPageMemoryPrompt(options = {}) {
+    const {
+      blocks = [],
+      pageContext = {},
+      customInstructions = "",
+      userGlossary = [],
+    } = options || {};
+    const input = {
+      page: {
+        title: normalizeCaptionText(pageContext.title),
+        url: normalizeCaptionText(pageContext.url),
+        language: normalizeCaptionText(pageContext.language),
+      },
+      user_glossary: normalizeGlossaryForPrompt(userGlossary),
+      sample_blocks: (Array.isArray(blocks) ? blocks : [])
+        .map(compactWebPageBlock)
+        .filter(Boolean)
+        .slice(0, 80),
+    };
+    const lines = [
+      "WebMemory map step: analyze this web page before translation.",
+      "Extract only stable facts that help translate this web page consistently.",
+      "Focus on domain, technical terminology, entities, abbreviations, and style guidance.",
+      'Return only JSON in this exact shape: {"summary":"...","domain":"...","styleGuide":"...","glossary":[{"source":"...","translation":"..."}],"entities":["..."]}',
+      "",
+      "Input JSON:",
+      JSON.stringify(input, null, 2),
+    ];
+    if (normalizeCaptionText(customInstructions)) {
+      lines.push("", "User translation preferences:", normalizeCaptionText(customInstructions));
+    }
+    return lines.join("\n");
+  }
+
+  function parseWebMemoryResponse(text) {
+    const memory = parseVideoMemoryResponse(text);
+    return {
+      summary: memory.summary,
+      domain: memory.domain,
+      styleGuide: memory.styleGuide,
+      glossary: memory.glossary,
+      entities: memory.entities,
+    };
+  }
+
+  function validateWebPageTranslationResult(options = {}) {
+    const blocks = (Array.isArray(options.blocks) ? options.blocks : [])
+      .map(compactWebPageBlock)
+      .filter(Boolean);
+    const translations = options.translations || {};
+    const validTranslations = {};
+    const retryIds = [];
+    const reasons = [];
+
+    blocks.forEach((block) => {
+      const translation = cleanTranslationText(translations[block.id]);
+      if (!translation) {
+        retryIds.push(block.id);
+        reasons.push(`missing:${block.id}`);
+        return;
+      }
+      const source = normalizeCaptionText(block.text).toLowerCase();
+      const target = normalizeCaptionText(translation).toLowerCase();
+      if (source && target === source) {
+        retryIds.push(block.id);
+        reasons.push(`copied-source:${block.id}`);
+        return;
+      }
+      const missingProtectedTerm = block.protected_terms.find(
+        (term) => term.text && !translation.includes(term.text),
+      );
+      if (missingProtectedTerm) {
+        retryIds.push(block.id);
+        reasons.push(`missing-protected:${block.id}:${missingProtectedTerm.text}`);
+        return;
+      }
+      validTranslations[block.id] = translation;
+    });
+
+    return {
+      ok: retryIds.length === 0,
+      retryIds,
+      validTranslations,
+      reason: reasons.join(" "),
+    };
+  }
+
+  function buildWebPageRepairPrompt(options = {}) {
+    const {
+      blocks = [],
+      pageContext = {},
+      pageMemory = {},
+      userGlossary = [],
+      targetLanguage = DEFAULT_SETTINGS.webTranslationTargetLanguage,
+      reason = "invalid",
+    } = options || {};
+    const promptInput = {
+      page: {
+        title: normalizeCaptionText(pageContext.title),
+        url: normalizeCaptionText(pageContext.url),
+        language: normalizeCaptionText(pageContext.language),
+      },
+      target_language:
+        normalizeCaptionText(targetLanguage) ||
+        DEFAULT_SETTINGS.webTranslationTargetLanguage,
+      repair_reason: normalizeCaptionText(reason),
+      pageMemory: pageMemory && typeof pageMemory === "object" ? pageMemory : {},
+      user_glossary: normalizeGlossaryForPrompt(userGlossary),
+      output_blocks: (Array.isArray(blocks) ? blocks : [])
+        .map(compactWebPageBlock)
+        .filter(Boolean),
+    };
+    return [
+      "Repair missing or invalid web page translations.",
+      "Only translate the listed output_blocks. Do not copy the source text as the translation.",
+      "Keep terminology consistent with pageMemory and user_glossary.",
+      "Do not translate, rewrite, or drop protected_terms; copy inline code, URLs, formulas, variables, and identifiers exactly when they belong to the block.",
+      'Return only JSON in this exact shape: {"translations":[{"id":"web-block-0","translation":"..."}],"glossary":[{"source":"...","translation":"..."}]}',
+      "",
+      "Input JSON:",
+      JSON.stringify(promptInput, null, 2),
+    ].join("\n");
+  }
+
+  function stringList(value) {
+    if (typeof value === "string") {
+      return value
+        .split("\n")
+        .flatMap((item) => item.split(","))
+        .map(normalizeCaptionText)
+        .filter(Boolean);
+    }
+    return (Array.isArray(value) ? value : [])
+      .map(normalizeCaptionText)
+      .filter(Boolean);
+  }
+
+  function parseWebTranslationSiteRules(value) {
+    if (!normalizeCaptionText(value)) {
+      return [];
+    }
+    try {
+      const parsed = JSON.parse(String(value));
+      const rawRules = Array.isArray(parsed) ? parsed : parsed?.rules;
+      return (Array.isArray(rawRules) ? rawRules : [])
+        .map((rule) => ({
+          name: normalizeCaptionText(rule?.name || rule?.id || ""),
+          matches: stringList(rule?.matches || rule?.match || rule?.host),
+          rootSelector: normalizeCaptionText(rule?.rootSelector),
+          blockSelector: normalizeCaptionText(rule?.blockSelector),
+          includeSelectors: stringList(rule?.includeSelectors || rule?.includeSelector),
+          excludeSelectors: stringList(rule?.excludeSelectors || rule?.excludeSelector),
+          minTextLength: clampInteger(rule?.minTextLength, 0, 2000, 0),
+          minWords: clampInteger(rule?.minWords, 0, 200, 0),
+        }))
+        .filter(
+          (rule) =>
+            rule.matches.length > 0 ||
+            rule.rootSelector ||
+            rule.blockSelector ||
+            rule.includeSelectors.length > 0 ||
+            rule.excludeSelectors.length > 0,
+        );
+    } catch (_error) {
+      return [];
+    }
+  }
+
+  function sitePatternMatches(url, pattern) {
+    const normalizedPattern = normalizeCaptionText(pattern).toLowerCase();
+    if (!normalizedPattern) {
+      return false;
+    }
+    try {
+      const parsed = new URL(url);
+      const host = parsed.hostname.toLowerCase();
+      if (normalizedPattern.startsWith("*.")) {
+        const suffix = normalizedPattern.slice(2);
+        return host === suffix || host.endsWith(`.${suffix}`);
+      }
+      if (/^https?:\/\//i.test(normalizedPattern)) {
+        return normalizePageUrlForCache(url).toLowerCase().startsWith(
+          normalizePageUrlForCache(normalizedPattern).toLowerCase(),
+        );
+      }
+      return host === normalizedPattern || host.endsWith(`.${normalizedPattern}`);
+    } catch (_error) {
+      return false;
+    }
+  }
+
+  function matchWebTranslationSiteRule(url, rules) {
+    return (
+      (Array.isArray(rules) ? rules : []).find((rule) =>
+        (Array.isArray(rule.matches) ? rule.matches : []).some((pattern) =>
+          sitePatternMatches(url, pattern),
+        ),
+      ) || null
+    );
   }
 
   function buildVideoMemoryChunks(cues, options = {}) {
@@ -2085,6 +2545,93 @@
     ].join("::");
   }
 
+  function normalizePageUrlForCache(value) {
+    const raw = normalizeCaptionText(value);
+    if (!raw) {
+      return "";
+    }
+    try {
+      const url = new URL(raw);
+      url.hash = "";
+      Array.from(url.searchParams.keys()).forEach((key) => {
+        const normalizedKey = key.toLowerCase();
+        if (
+          normalizedKey.startsWith("utm_") ||
+          normalizedKey === "fbclid" ||
+          normalizedKey === "gclid"
+        ) {
+          url.searchParams.delete(key);
+        }
+      });
+      url.searchParams.sort();
+      const query = url.searchParams.toString();
+      return `${url.origin}${url.pathname}${query ? `?${query}` : ""}`;
+    } catch (_error) {
+      return raw.replace(/#.*$/, "");
+    }
+  }
+
+  function createWebPageTranslationCacheKey(options = {}) {
+    const sourceHash =
+      options.sourceTextHash ||
+      createSourceCleanHash(normalizeCaptionText(options.sourceText).toLowerCase());
+    const headingHash = stableHash(
+      (Array.isArray(options.headingPath) ? options.headingPath : [])
+        .map(normalizeCaptionText)
+        .filter(Boolean)
+        .join(" > ")
+        .toLowerCase(),
+    );
+    const protectedTermsHash = stableHash(
+      JSON.stringify(
+        normalizeWebPageProtectedTerms(
+          options.protectedTerms || options.protected_terms,
+        ),
+      ),
+    );
+    return [
+      normalizeCaptionText(options.provider).toLowerCase(),
+      normalizeCaptionText(options.model).toLowerCase(),
+      normalizePageUrlForCache(options.pageUrl),
+      normalizeCaptionText(options.sourceLanguage).toLowerCase(),
+      normalizeCaptionText(options.targetLanguage),
+      normalizeCaptionText(options.promptVersion),
+      normalizeCaptionText(options.glossaryVersion),
+      headingHash,
+      protectedTermsHash,
+      sourceHash,
+    ].join("::");
+  }
+
+  function sortWebPageBlocksByPosition(blocks, options = {}) {
+    const rowTolerance = Number.isFinite(Number(options.rowTolerance))
+      ? Number(options.rowTolerance)
+      : 16;
+    return (Array.isArray(blocks) ? blocks : [])
+      .slice()
+      .sort((left, right) => {
+        const leftTop = Number(left?.top);
+        const rightTop = Number(right?.top);
+        const safeLeftTop = Number.isFinite(leftTop) ? leftTop : 0;
+        const safeRightTop = Number.isFinite(rightTop) ? rightTop : 0;
+        const topDelta = safeLeftTop - safeRightTop;
+        if (Math.abs(topDelta) > rowTolerance) {
+          return topDelta;
+        }
+
+        const leftX = Number(left?.left);
+        const rightX = Number(right?.left);
+        const safeLeftX = Number.isFinite(leftX) ? leftX : 0;
+        const safeRightX = Number.isFinite(rightX) ? rightX : 0;
+        const leftDelta = safeLeftX - safeRightX;
+        if (Math.abs(leftDelta) > 1) {
+          return leftDelta;
+        }
+
+        return Number(left?.order || 0) - Number(right?.order || 0);
+      });
+  }
+
   function applyGlossaryConsistency(options = {}) {
     const cueTranslations = options.cueTranslations || {};
     const cueSources = options.cueSources || {};
@@ -2223,12 +2770,17 @@
     DEFAULT_SETTINGS,
     COURSE_TRANSLATION_GUIDANCE,
     TRANSLATION_PROMPT_VERSION,
+    WEB_TRANSLATION_PROMPT_VERSION,
     normalizeCaptionText,
+    runtimeErrorMessage,
+    isProbablyCodeText,
+    splitWebPageTextSegments,
     parseUserGlossary,
     createGlossaryVersion,
     createSourceCleanHash,
     applyGlossaryConsistency,
     extractVisibleCaptionText,
+    isNonSpeechCaptionText,
     buildBilingualCaption,
     extractCaptionTracksFromScripts,
     chooseCaptionTrack,
@@ -2246,6 +2798,15 @@
     buildTranslationSegmentsFromCues,
     buildSegmentTranslationPrompt,
     parseSegmentTranslationResponse,
+    buildWebPageTranslationPrompt,
+    parseWebPageTranslationResponse,
+    buildWebPageMemoryPrompt,
+    parseWebMemoryResponse,
+    normalizeWebPageProtectedTerms,
+    validateWebPageTranslationResult,
+    buildWebPageRepairPrompt,
+    parseWebTranslationSiteRules,
+    matchWebTranslationSiteRule,
     buildVideoMemoryChunks,
     buildVideoMemoryPrompt,
     buildVideoMemoryReducePrompt,
@@ -2265,6 +2826,8 @@
     extractProviderResponseText,
     parseProviderResponse,
     createCaptionCacheKey,
+    createWebPageTranslationCacheKey,
+    sortWebPageBlocksByPosition,
     getYouTubeVideoId,
     buildProviderRequest,
   };

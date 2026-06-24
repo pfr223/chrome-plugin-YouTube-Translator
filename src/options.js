@@ -23,6 +23,11 @@ const form = {
   userGlossary: document.querySelector("#userGlossary"),
   syncStrategy: document.querySelector("#syncStrategy"),
   sourceDisplayMode: document.querySelector("#sourceDisplayMode"),
+  webTranslationEnabled: document.querySelector("#webTranslationEnabled"),
+  webTranslationTargetLanguage: document.querySelector("#webTranslationTargetLanguage"),
+  webTranslationDisplayMode: document.querySelector("#webTranslationDisplayMode"),
+  webTranslationScope: document.querySelector("#webTranslationScope"),
+  webTranslationSiteRules: document.querySelector("#webTranslationSiteRules"),
   overlayOpacityPercent: document.querySelector("#overlayOpacityPercent"),
   overlayOpacityValue: document.querySelector("#overlayOpacityValue"),
   overlayFontScalePercent: document.querySelector("#overlayFontScalePercent"),
@@ -40,16 +45,35 @@ const state = {
   displaySaveTimer: 0,
 };
 
+function runtimeErrorMessage(error, fallback = "操作失败") {
+  const message = String(
+    typeof error === "string" ? error : error?.message || "",
+  )
+    .replace(/\s+/g, " ")
+    .trim();
+  if (
+    /extension context invalidated|receiving end does not exist|context invalidated/i
+      .test(message)
+  ) {
+    return "扩展已重新加载，请刷新页面后继续使用。";
+  }
+  return message || fallback;
+}
+
 function sendMessage(message) {
   return new Promise((resolve, reject) => {
-    chrome.runtime.sendMessage(message, (response) => {
-      const lastError = chrome.runtime.lastError;
-      if (lastError) {
-        reject(new Error(lastError.message));
-        return;
-      }
-      resolve(response);
-    });
+    try {
+      chrome.runtime.sendMessage(message, (response) => {
+        const lastError = chrome.runtime.lastError;
+        if (lastError) {
+          reject(new Error(runtimeErrorMessage(lastError, "扩展通信失败")));
+          return;
+        }
+        resolve(response);
+      });
+    } catch (error) {
+      reject(new Error(runtimeErrorMessage(error, "扩展通信失败")));
+    }
   });
 }
 
@@ -121,8 +145,15 @@ async function loadSettings() {
   form.contextItems.value = settings.contextItems;
   form.customInstructions.value = settings.customInstructions || "";
   form.userGlossary.value = settings.userGlossary || "";
-  form.syncStrategy.value = settings.syncStrategy || "cue";
+  form.syncStrategy.value = settings.syncStrategy || "segment";
   form.sourceDisplayMode.value = settings.sourceDisplayMode || "raw";
+  form.webTranslationEnabled.checked = settings.webTranslationEnabled !== false;
+  form.webTranslationTargetLanguage.value =
+    settings.webTranslationTargetLanguage || "zh-CN";
+  form.webTranslationDisplayMode.value =
+    settings.webTranslationDisplayMode || "bilingual";
+  form.webTranslationScope.value = settings.webTranslationScope || "page";
+  form.webTranslationSiteRules.value = settings.webTranslationSiteRules || "";
   form.overlayOpacityPercent.value = settings.overlayOpacityPercent;
   form.overlayFontScalePercent.value = settings.overlayFontScalePercent;
   state.overlayXPercent = settings.overlayXPercent;
@@ -144,6 +175,11 @@ async function saveSettings() {
     userGlossary: form.userGlossary.value,
     syncStrategy: form.syncStrategy.value,
     sourceDisplayMode: form.sourceDisplayMode.value,
+    webTranslationEnabled: form.webTranslationEnabled.checked,
+    webTranslationTargetLanguage: form.webTranslationTargetLanguage.value,
+    webTranslationDisplayMode: form.webTranslationDisplayMode.value,
+    webTranslationScope: form.webTranslationScope.value,
+    webTranslationSiteRules: form.webTranslationSiteRules.value,
     overlayOpacityPercent: form.overlayOpacityPercent.value,
     overlayFontScalePercent: form.overlayFontScalePercent.value,
     overlayXPercent: state.overlayXPercent,

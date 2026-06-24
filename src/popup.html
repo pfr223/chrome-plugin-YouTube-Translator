@@ -26,10 +26,32 @@
           API key
           <input id="apiKey" type="password" autocomplete="off" placeholder="保存在本机 Chrome" />
         </label>
+        <label>
+          网页目标语言
+          <input id="popupWebTranslationTargetLanguage" type="text" spellcheck="false" placeholder="zh-CN" />
+        </label>
+        <label>
+          网页显示模式
+          <select id="popupWebTranslationDisplayMode">
+            <option value="bilingual">原文下方插入译文</option>
+            <option value="translation">仅插入译文样式</option>
+          </select>
+        </label>
+        <label>
+          网页翻译范围
+          <select id="popupWebTranslationScope">
+            <option value="page">整页渐进翻译</option>
+            <option value="viewport">当前视窗附近，滚动时继续</option>
+          </select>
+        </label>
         <p id="status" class="status"></p>
         <div class="actions">
           <button id="openOptions" type="button">更多设置</button>
           <button id="save" class="primary" type="button">保存</button>
+        </div>
+        <div class="actions split">
+          <button id="translatePage" class="primary" type="button">翻译当前网页</button>
+          <button id="clearPageTranslations" type="button">清除网页译文</button>
         </div>
       </section>
     </main>

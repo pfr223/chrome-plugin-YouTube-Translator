@@ -1,8 +1,8 @@
 {
   "manifest_version": 3,
   "name": "YouTube Context Translator",
-  "version": "0.1.0",
-  "description": "Context-aware Simplified Chinese translation overlay for YouTube captions.",
+  "version": "3.0.0",
+  "description": "Context-aware Simplified Chinese translation for YouTube captions and ordinary web pages.",
   "homepage_url": "https://github.com/pfr223/chrome-plugin-YouTube-Translator",
   "icons": {
     "16": "assets/icons/icon16.png",
@@ -10,7 +10,7 @@
     "48": "assets/icons/icon48.png",
     "128": "assets/icons/icon128.png"
   },
-  "permissions": ["storage"],
+  "permissions": ["storage", "activeTab", "scripting"],
   "host_permissions": [
     "https://www.youtube.com/*",
     "https://m.youtube.com/*",
