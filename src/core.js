@@ -24,7 +24,7 @@
     overlayXPercent: 50,
     overlayYPercent: 86,
   });
-  const TRANSLATION_PROMPT_VERSION = "segment-v2";
+  const TRANSLATION_PROMPT_VERSION = "segment-v3";
   const WEB_TRANSLATION_PROMPT_VERSION = "web-v1";
   const COURSE_TRANSLATION_GUIDANCE = Object.freeze([
     "Assume this is an ML/AI/RL course lecture unless metadata clearly says otherwise.",
