@@ -937,6 +937,22 @@
     const rawCues = [];
     const seen = new Set();
 
+    function looksLikeMergedTranscriptDomRow(rowText, source) {
+      const normalizedRowText = normalizeCaptionText(rowText);
+      const normalizedSource = normalizeCaptionText(source);
+      if (normalizedSource.length < 220) {
+        return false;
+      }
+
+      const timestampCount =
+        (normalizedRowText.match(/\b\d{1,2}:\d{2,4}\b/g) || []).length +
+        (normalizedSource.match(/\b\d{1,2}:\d{2,4}\b/g) || []).length;
+      const durationLabelCount =
+        (normalizedRowText.match(/(?:minutes?|seconds?)/gi) || []).length +
+        (normalizedSource.match(/(?:minutes?|seconds?)/gi) || []).length;
+      return timestampCount >= 2 || durationLabelCount >= 3;
+    }
+
     (Array.isArray(rows) ? rows : []).forEach((row) => {
       const rowText =
         typeof row === "string"
@@ -964,7 +980,12 @@
       );
       const key = `${roundSeconds(start)}::${source.toLowerCase()}`;
 
-      if (!source || !Number.isFinite(start) || seen.has(key)) {
+      if (
+        !source ||
+        !Number.isFinite(start) ||
+        looksLikeMergedTranscriptDomRow(rowText, source) ||
+        seen.has(key)
+      ) {
         return;
       }
       seen.add(key);

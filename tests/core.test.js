@@ -1185,6 +1185,25 @@ test("parses visible YouTube transcript panel rows into complete cues", () => {
   ]);
 });
 
+test("ignores merged transcript panel container rows", () => {
+  const cues = core.parseTranscriptDomRows(
+    [
+      {
+        timestamp: "0:05",
+        rowText:
+          "0:055 seconds[music]0:077 secondsMy name is Sitha Raman. I lead the innovation digital transformation practice.0:1616 secondsThis program is not just about pre-training.0:2525 secondsmultiple concepts from KV cache and attention mechanisms.0:3434 secondsmany other possibilities of attention mechanisms.",
+        text:
+          "[music]0:077 secondsMy name is Sitha Raman. I lead the innovation digital transformation practice.0:1616 secondsThis program is not just about pre-training.0:2525 secondsmultiple concepts from KV cache and attention mechanisms.0:3434 secondsmany other possibilities of attention mechanisms.",
+      },
+      { timestamp: "0:07", text: "My name is Sitha Raman." },
+    ],
+    1307,
+  );
+
+  assert.equal(cues.length, 1);
+  assert.equal(cues[0].source, "My name is Sitha Raman.");
+});
+
 test("does not keep a trailing music transcript cue active until video end", () => {
   const cues = core.parseTranscriptDomRows(
     [
